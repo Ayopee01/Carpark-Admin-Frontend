@@ -1,36 +1,60 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Smart Carpark Admin Frontend
 
-## Getting Started
+หน้าแอดมินของระบบลานจอดรถ (Next.js 16, React 19) เรียก Smart Carpark API โดยตรงจาก browser
+session อยู่ใน httpOnly cookie ของ API และ API อนุญาตโดเมนนี้ด้วย CORS (`ADMIN_ORIGINS`)
 
-First, run the development server:
+## พัฒนาในเครื่อง
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+cp .env.example .env.local   # ตั้ง NEXT_PUBLIC_API_BASE_URL เป็น origin ของ API เช่น http://localhost:8080
+npm ci
+npm run dev                  # http://localhost:3000 (ต้องอยู่ใน ADMIN_ORIGINS ของ API)
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+ตรวจก่อน push: `npm run lint`, `npm run typecheck`, `npm run build`
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## CI/CD
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| Workflow | เมื่อไหร่ | ทำอะไร |
+| --- | --- | --- |
+| `.github/workflows/ci.yml` | ทุก pull request และ push ที่ไม่ใช่ `main` | lint, typecheck, build |
+| `.github/workflows/deploy.yml` | push เข้า `main` หรือกดรันเอง | ตรวจแบบเดียวกัน → build Docker image → push ไป GHCR → SSH เข้า server แล้ว `docker compose up` |
 
-## Learn More
+image: `ghcr.io/<owner>/carpark-admin-frontend:<commit sha>` (และ `:latest`)
+`NEXT_PUBLIC_API_BASE_URL` ถูกฝังตอน build image ถ้าเปลี่ยนค่าต้อง deploy ใหม่
 
-To learn more about Next.js, take a look at the following resources:
+### ตั้งค่าครั้งแรก
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+**GitHub** (Settings → Environments → สร้าง `production`)
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+| ชนิด | ชื่อ | ค่า |
+| --- | --- | --- |
+| Variable | `NEXT_PUBLIC_API_BASE_URL` | origin ของ API เช่น `https://api.<domain>` |
+| Variable | `DEPLOY_PATH` | โฟลเดอร์บน server เช่น `/srv/smart-carpark/admin` |
+| Secret | `DEPLOY_HOST` | IP หรือ hostname ของ server |
+| Secret | `DEPLOY_PORT` | port ของ SSH (ปกติ `22`) |
+| Secret | `DEPLOY_USER` | user ที่ใช้ docker ได้ |
+| Secret | `DEPLOY_SSH_KEY` | private key ของ user นั้น |
 
-## Deploy on Vercel
+ใส่ Required reviewers ใน environment `production` ได้ถ้าต้องการให้มีคนกดอนุมัติก่อน deploy
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+**Server**
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+1. ติดตั้ง Docker และ Docker Compose v2.17 ขึ้นไป (ใช้ `--wait`)
+2. สร้างโฟลเดอร์ตาม `DEPLOY_PATH` ให้ user ใน `DEPLOY_USER` เขียนได้
+3. มี network `npm-network` ของ Nginx Proxy Manager อยู่แล้ว (เดียวกับ API)
+4. Nginx Proxy Manager: Proxy Host ของโดเมน Admin → `smart-carpark-admin:3000` เปิด SSL
+
+workflow จะ copy `docker-compose.yml` ไปที่ `DEPLOY_PATH` ทุกครั้ง และ login GHCR ด้วย token ชั่วคราวของ job จึงไม่ต้องเก็บ token ไว้บน server
+
+### Rollback
+
+image ทุกตัวมี tag เป็น commit sha บน server รัน:
+
+```bash
+cd $DEPLOY_PATH
+cat .deployed-image                       # image ที่ deploy ล่าสุด
+ADMIN_IMAGE=ghcr.io/<owner>/carpark-admin-frontend:<sha เดิม> docker compose up -d --wait
+```
+
+ถ้า package บน GHCR เป็น private ต้อง `docker login ghcr.io` ด้วย token ที่มีสิทธิ์ `read:packages` ก่อน หรือเปิด run ของ Deploy ครั้งก่อนในแท็บ Actions แล้วกด Re-run all jobs (จะ deploy commit เดิม)
