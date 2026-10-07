@@ -1,15 +1,11 @@
-import type { ReactNode } from "react";
-import ProgressBar from "@/src/app/components/dashboard/ProgressBar";
+// Import Library
+import type { JSX } from "react";
+// Import Components
+import { ProgressBar } from "@/src/app/components/shared/StatCards";
+// Import Types
+import type { ChannelCardProps } from "@/src/app/type/ui/dashboard";
 
-type ChannelCardProps = {
-    title: string;
-    subTitle: string;
-    countText: string;
-    amountText: string;
-    percent: number;
-    icon: ReactNode;
-};
-
+// Function การ์ดยอดเงินและจำนวนรายการของช่องทางชำระหนึ่งช่องทาง
 function ChannelCard({
     title,
     subTitle,
@@ -17,7 +13,7 @@ function ChannelCard({
     amountText,
     percent,
     icon,
-}: ChannelCardProps) {
+}: ChannelCardProps): JSX.Element {
     return (
         <article className="rounded-[18px] bg-[#E4E6E8] px-4 pb-4 pt-4 shadow-none md:px-5">
             <div className="flex h-10 w-10 items-center justify-center rounded-[6px] bg-[#F7F7F8] text-[#1F2937]">
@@ -57,4 +53,4 @@ function ChannelCard({
     );
 }
 
-export default ChannelCard;
+export { ChannelCard };

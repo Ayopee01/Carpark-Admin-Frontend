@@ -1,53 +1,41 @@
 "use client";
-
-import { useEffect, useMemo, useRef, useState } from "react";
+// Import Library
+import { useEffect, useMemo, useRef, useState, type JSX } from "react";
 import type { DateRange } from "react-day-picker";
 import { LuCarFront, LuChevronDown, LuSearch } from "react-icons/lu";
+// Import Components
+import { LoadingScreen } from "@/src/app/components/shared/LoadingScreen";
+import { TransactionsTable } from "@/src/app/components/check-payment/TransactionsTable";
+import { PaymentModal } from "@/src/app/components/check-payment/PaymentModal";
+import { DateRangeFilter } from "@/src/app/components/shared/DateRangeFilter";
+// Import Api
+import { getTransactions, subscribeTransactionEvents, updateTransaction } from "@/src/app/lib/api/transactions";
+// Import Types
+import type { TransactionListItem, TransactionListQuery, TransactionLatestPayment } from "@/src/app/type/api/transactions";
+import type { TransactionEditDraft, TransactionItem, TransactionStatusFilter } from "@/src/app/type/ui/checkPayment";
+// Import Shared
+import { getErrorMessage as apiErrorMessage, getFieldErrors } from "@/src/app/lib/shared/http";
 
-import Preload from "@/src/app/components/Preload";
-import TransactionsTable from "@/src/app/components/check-payment/TransactionsTable";
-import PaymentModal from "@/src/app/components/check-payment/PaymentModal";
-import DateRangeFilter from "@/src/app/components/summary/DateRangeFilter";
+/* -------------------------------------- Config -------------------------------------- */
 
-import type {
-  TransactionEditDraft,
-  TransactionItem,
-  TransactionListResponse,
-  TransactionStatus,
-} from "@/src/app/type/check-payment/transactions";
-
+// Config จำนวนแถวต่อหน้าของตาราง
 const TABLE_ITEMS_PER_PAGE = 10;
 
-type RawTransactionItem = TransactionListResponse["data"][number];
+// Config รอ snapshot แรกจาก SSE ก่อนโหลดผ่าน API แทน
+const FIRST_SNAPSHOT_TIMEOUT_MS = 8000;
 
-type TransactionListApiResponse = TransactionListResponse;
+// Config query ของรายการ (ทั้งหมด แล้วกรองและแบ่งหน้าในหน้านี้)
+const LIST_QUERY: TransactionListQuery = { all: "true" };
 
-function getErrorMessage(value: unknown, fallback: string) {
-  if (
-    value &&
-    typeof value === "object" &&
-    "message" in value &&
-    typeof value.message === "string"
-  ) {
-    return value.message;
-  }
+/* -------------------------------------- Helpers -------------------------------------- */
 
-  return fallback;
-}
-
-function isTransactionListApiResponse(
-  value: unknown
-): value is TransactionListApiResponse {
-  if (!value || typeof value !== "object") return false;
-
-  return "data" in value || "meta" in value;
-}
-
-function normalizeDateOnly(date: Date) {
+// Function ตัดเวลาออกจากวันที่
+function normalizeDateOnly(date: Date): Date {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate());
 }
 
-function isDateInRange(value: string | null | undefined, range?: DateRange) {
+// Function ตรวจว่าวันที่อยู่ในช่วงที่เลือก
+function isDateInRange(value: string | null | undefined, range?: DateRange): boolean {
   if (!range?.from) return true;
   if (!value) return false;
 
@@ -64,7 +52,8 @@ function isDateInRange(value: string | null | undefined, range?: DateRange) {
   return target >= from && target <= to;
 }
 
-function getDateTimeValue(value: string | null | undefined) {
+// Function แปลงวันเวลาเป็น timestamp สำหรับเรียงลำดับ (ไม่มี = 0)
+function getDateTimeValue(value: string | null | undefined): number {
   if (!value) return 0;
 
   const date = new Date(value);
@@ -72,11 +61,13 @@ function getDateTimeValue(value: string | null | undefined) {
   return Number.isNaN(date.getTime()) ? 0 : date.getTime();
 }
 
-function getLastPayment(item: RawTransactionItem) {
+// Function ดึงการชำระล่าสุดของรายการ
+function getLastPayment(item: TransactionListItem): TransactionLatestPayment | null {
   return item.latestPayment;
 }
 
-function normalizeTransaction(item: RawTransactionItem): TransactionItem {
+// Function แปลงแถวจาก API เป็นแถวของตาราง
+function normalizeTransaction(item: TransactionListItem): TransactionItem {
   const lastPayment = getLastPayment(item);
 
   return {
@@ -91,18 +82,20 @@ function normalizeTransaction(item: RawTransactionItem): TransactionItem {
     payment: {
       method: lastPayment?.method ?? null,
       paidAt: lastPayment?.paidAt ?? null,
+      reference: lastPayment?.reference ?? null,
     },
   };
 }
 
-type StatusFilter = "all" | TransactionStatus;
+/* -------------------------------------- Component -------------------------------------- */
 
-function CheckPaymentPage() {
+// Function หน้าตรวจสอบ รายการรถแบบ realtime ค้นหา แก้ทะเบียน และรับชำระ
+function CheckPaymentPage(): JSX.Element {
   const [searchPlate, setSearchPlate] = useState("");
   const [debouncedSearchPlate, setDebouncedSearchPlate] = useState("");
   const [dateRange, setDateRange] = useState<DateRange | undefined>();
 
-  const [status, setStatus] = useState<StatusFilter>("all");
+  const [status, setStatus] = useState<TransactionStatusFilter>("all");
   const [items, setItems] = useState<TransactionItem[]>([]);
   const [page, setPage] = useState(1);
 
@@ -110,6 +103,8 @@ function CheckPaymentPage() {
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState("");
   const [isRealtime, setIsRealtime] = useState(false);
+  // error จากการแก้แถว แสดงเหนือตารางแทนที่จะแทนตาราง
+  const [editError, setEditError] = useState("");
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [savingEditId, setSavingEditId] = useState<string | null>(null);
@@ -209,37 +204,14 @@ function CheckPaymentPage() {
 
       setError("");
 
-      const token = localStorage.getItem("token");
-
       if (showLoading) {
         setProgress(18);
       }
 
-      const response = await fetch("/api/check-payment/transactions?all=true", {
-        method: "GET",
-        headers: {
-          Accept: "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        cache: "no-store",
-      });
-
-      if (showLoading) {
-        setProgress(60);
-      }
-
-      const raw = (await response.json().catch(() => null)) as TransactionListApiResponse | null;
+      const raw = await getTransactions(LIST_QUERY);
 
       if (showLoading) {
         setProgress(82);
-      }
-
-      if (!response.ok) {
-        throw new Error(getErrorMessage(raw, "ไม่สามารถโหลดข้อมูลได้"));
-      }
-
-      if (!isTransactionListApiResponse(raw)) {
-        throw new Error("รูปแบบข้อมูลรายการไม่ถูกต้อง");
       }
 
       const normalizedItems = (raw.data ?? []).map(normalizeTransaction);
@@ -260,129 +232,57 @@ function CheckPaymentPage() {
     }
   }
 
+  // รายการมาจาก stream ทุก snapshot และ update มีรายการทั้งหมด จึงไม่ต้องเรียก API
   useEffect(() => {
-    void fetchTransactions(true);
+    let pollingTimer: number | undefined;
+    let receivedSnapshot = false;
+
+    setLoading(true);
+    setProgress(30);
+
+    // สำรองเท่านั้น ไม่ได้ snapshot ตามเวลาให้โหลดผ่าน API ครั้งเดียว
+    const firstLoadTimer = window.setTimeout(() => {
+      if (!receivedSnapshot) void fetchTransactions(true);
+    }, FIRST_SNAPSHOT_TIMEOUT_MS);
+
+    const unsubscribe = subscribeTransactionEvents(
+      LIST_QUERY,
+      {
+        onStatusChange: (streamStatus) => setIsRealtime(streamStatus === "open"),
+        onEvent: (event) => {
+          if (
+            event.type === "transactions_snapshot" ||
+            event.type === "transactions_updated"
+          ) {
+            setItems((event.data?.data ?? []).map(normalizeTransaction));
+            setError("");
+            if (!receivedSnapshot) {
+              receivedSnapshot = true;
+              setProgress(100);
+              finishLoadingAfterDelay();
+            }
+          }
+        },
+        // stream ถูกปฏิเสธ (4xx) ให้โหลดผ่าน API แทน
+        onFatalError: () => {
+          receivedSnapshot = true;
+          void fetchTransactions(true);
+          pollingTimer = window.setInterval(() => {
+            void fetchTransactions(false);
+          }, 30000);
+        },
+      }
+    );
 
     return () => {
+      unsubscribe();
+      window.clearTimeout(firstLoadTimer);
+      window.clearInterval(pollingTimer);
       if (loadingTimerRef.current) {
         window.clearTimeout(loadingTimerRef.current);
       }
     };
-  }, []);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    let reconnectTimer: number | undefined;
-    let pollingTimer: number | undefined;
-    let refetchTimer: number | undefined;
-    let eventsUnsupported = false;
-
-    function scheduleRefetch() {
-      if (refetchTimer) {
-        window.clearTimeout(refetchTimer);
-      }
-
-      refetchTimer = window.setTimeout(() => {
-        void fetchTransactions(false);
-      }, 300);
-    }
-
-    async function pollTransactions() {
-      try {
-        await fetchTransactions(false);
-      } catch {
-        // The next polling interval retries automatically.
-      }
-    }
-
-    function startPolling() {
-      setIsRealtime(false);
-
-      if (pollingTimer) return;
-
-      void pollTransactions();
-      pollingTimer = window.setInterval(pollTransactions, 30000);
-    }
-
-    async function connect() {
-      try {
-        const token = localStorage.getItem("token");
-        const response = await fetch("/api/check-payment/transactions/events", {
-          headers: {
-            Accept: "text/event-stream",
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
-          signal: controller.signal,
-        });
-
-        if (response.status === 404 || response.status === 501) {
-          eventsUnsupported = true;
-          startPolling();
-          return;
-        }
-
-        if (!response.ok || !response.body) {
-          throw new Error("SSE unavailable");
-        }
-
-        setIsRealtime(true);
-
-        if (pollingTimer) {
-          window.clearInterval(pollingTimer);
-          pollingTimer = undefined;
-        }
-
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-
-        while (!controller.signal.aborted) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const chunks = buffer.split(/\r?\n\r?\n/);
-          buffer = chunks.pop() ?? "";
-
-          for (const chunk of chunks) {
-            const dataText = chunk
-              .split(/\r?\n/)
-              .filter((line) => line.startsWith("data:"))
-              .map((line) => line.slice(5).trim())
-              .join("\n");
-
-            if (!dataText) continue;
-
-            const event = JSON.parse(dataText) as { type?: string };
-            if (event.type === "connected" || event.type === "ping") continue;
-
-            scheduleRefetch();
-          }
-        }
-
-        if (!controller.signal.aborted) {
-          throw new Error("SSE disconnected");
-        }
-      } catch {
-        if (controller.signal.aborted) return;
-
-        startPolling();
-
-        if (!eventsUnsupported) {
-          reconnectTimer = window.setTimeout(connect, 5000);
-        }
-      }
-    }
-
-    void connect();
-
-    return () => {
-      controller.abort();
-
-      if (reconnectTimer) window.clearTimeout(reconnectTimer);
-      if (pollingTimer) window.clearInterval(pollingTimer);
-      if (refetchTimer) window.clearTimeout(refetchTimer);
-    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- subscribe once on mount
   }, []);
 
   useEffect(() => {
@@ -405,7 +305,7 @@ function CheckPaymentPage() {
     }
   }, [page, totalPages]);
 
-  function handleChangeStatus(nextStatus: StatusFilter) {
+  function handleChangeStatus(nextStatus: TransactionStatusFilter) {
     setStatus(nextStatus);
   }
 
@@ -421,6 +321,7 @@ function CheckPaymentPage() {
   }
 
   function handleCancelEdit() {
+    setEditError("");
     setEditingId(null);
     setDraft(null);
   }
@@ -438,42 +339,31 @@ function CheckPaymentPage() {
 
   async function handleSaveEdit(id: string) {
     const nextPlateNo = draft?.plateNo?.trim();
+    // PATCH /transactions/:plateNo ใช้ทะเบียนเต็มปัจจุบัน ไม่ใช่ id
+    const currentPlateNo = items.find((item) => item.id === id)?.plateNo;
 
     if (!nextPlateNo) {
-      setError("กรุณากรอกเลขทะเบียน");
+      setEditError("กรุณากรอกเลขทะเบียน");
+      return;
+    }
+
+    if (!currentPlateNo) {
+      setEditError("ไม่พบรายการนี้แล้ว กรุณาโหลดข้อมูลใหม่");
       return;
     }
 
     try {
       setSavingEditId(id);
-      setError("");
+      setEditError("");
 
-      const token = localStorage.getItem("token");
-
-      const response = await fetch(
-        `/api/check-payment/transactions/${id}`,
-        {
-          method: "PATCH",
-          headers: {
-            "Content-Type": "application/json",
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
-          body: JSON.stringify({
-            plateNo: nextPlateNo,
-          }),
-        }
-      );
-
-      const raw: unknown = await response.json().catch(() => null);
-
-      if (!response.ok) {
-        throw new Error(getErrorMessage(raw, "ไม่สามารถแก้ไขเลขทะเบียนได้"));
-      }
+      await updateTransaction(currentPlateNo, { plateNo: nextPlateNo });
 
       handleCancelEdit();
       await fetchTransactions(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "เกิดข้อผิดพลาด");
+      // VALIDATION_ERROR แสดงข้อความของ plateNo ส่วน error อื่นมีข้อความไทยจาก toApiError
+      const plateError = getFieldErrors(err).plateNo;
+      setEditError(plateError ? `เลขทะเบียน: ${plateError}` : apiErrorMessage(err, "เกิดข้อผิดพลาด"));
     } finally {
       setSavingEditId(null);
     }
@@ -493,7 +383,7 @@ function CheckPaymentPage() {
 
   if (loading) {
     return (
-      <Preload
+      <LoadingScreen
         open
         progress={progress}
         message="กำลังโหลดข้อมูล..."
@@ -566,7 +456,7 @@ function CheckPaymentPage() {
                     value={status}
                     onChange={(event) =>
                       handleChangeStatus(
-                        event.target.value as StatusFilter
+                        event.target.value as TransactionStatusFilter
                       )
                     }
                     className="appearance-none rounded-full bg-white px-5 py-2 pr-10 text-[14px] font-semibold text-[#1F2933] outline-none"
@@ -586,6 +476,12 @@ function CheckPaymentPage() {
                 </div>
               </div>
             </div>
+
+            {editError && !error ? (
+              <div className="border-b border-red-200 bg-red-50 px-6 py-3 text-[14px] text-red-600">
+                {editError}
+              </div>
+            ) : null}
 
             {error ? (
               <div className="px-6 py-10 text-[15px] text-red-600">{error}</div>

@@ -1,30 +1,33 @@
 "use client";
-
-import { useEffect, useMemo, useState } from "react";
+// Import Library
+import { useEffect, useMemo, useRef, useState, type JSX } from "react";
 import type { DateRange } from "react-day-picker";
-import {
-    LuArrowDownToLine,
-    LuCircleDollarSign,
-    LuClock3,
-    LuQrCode,
-    LuTicket,
-    LuUserRound,
-} from "react-icons/lu";
+import { LuArrowDownToLine, LuCircleDollarSign, LuClock3, LuQrCode, LuTicket, LuUserRound } from "react-icons/lu";
+// Import Components
+import { LoadingScreen } from "@/src/app/components/shared/LoadingScreen";
+import { RevenueGroupCard, SummaryCard } from "@/src/app/components/shared/StatCards";
+import { DateRangeFilter } from "@/src/app/components/shared/DateRangeFilter";
+import { UsageChartCard } from "@/src/app/components/summary/UsageChartCard";
+import { ServiceSummaryCard } from "@/src/app/components/summary/ServiceSummaryCard";
+// Import Api
+import { getOverview, subscribeOverviewEvents } from "@/src/app/lib/api/overview";
+// Import Types
+import type { SseStatus } from "@/src/app/type/api/common";
+// Import Shared
+import { getErrorMessage } from "@/src/app/lib/shared/http";
 
-import Preload from "@/src/app/components/Preload";
-import SummaryCard from "@/src/app/components/dashboard/SummaryCard";
-import RevenueGroupCard from "@/src/app/components/dashboard/RevenueGroupCard";
-import DateRangeFilter from "@/src/app/components/summary/DateRangeFilter";
-import UsageChartCard from "@/src/app/components/summary/UsageChartCard";
-import ServiceSummaryCard from "@/src/app/components/summary/ServiceSummaryCard";
+/* -------------------------------------- Config -------------------------------------- */
 
-import type {
-    OverviewRevenueGroup,
-    OverviewSseEvent,
-    OverviewSummaryResponse,
-} from "@/src/app/type/summary/summary";
+// Config รอ snapshot แรกจาก SSE ก่อนโหลดผ่าน API แทน
+const FIRST_SNAPSHOT_TIMEOUT_MS = 8000;
+import { formatBaht, formatCount, formatMoney } from "@/src/app/lib/shared/format";
 
-function formatDateParam(date?: Date) {
+import type { OverviewQuery, OverviewRevenueGroup, OverviewSummary } from "@/src/app/type/api/overview";
+
+/* -------------------------------------- Helpers -------------------------------------- */
+
+// Function แปลงวันที่เป็น YYYY-MM-DD
+function formatDateParam(date?: Date): string {
     if (!date) return "";
 
     const year = date.getFullYear();
@@ -34,7 +37,8 @@ function formatDateParam(date?: Date) {
     return `${year}-${month}-${day}`;
 }
 
-function getDateRangeParams(range?: DateRange) {
+// Function สร้าง start_date/end_date จากช่วงวันที่ที่เลือก
+function getDateRangeParams(range?: DateRange): { startDate: string; endDate: string } {
     if (!range?.from) {
         return {
             startDate: "",
@@ -51,25 +55,21 @@ function getDateRangeParams(range?: DateRange) {
     };
 }
 
-function getErrorMessage(value: unknown, fallback: string) {
-    if (
-        value &&
-        typeof value === "object" &&
-        "message" in value &&
-        typeof value.message === "string"
-    ) {
-        return value.message;
-    }
+/* -------------------------------------- Component -------------------------------------- */
 
-    return fallback;
-}
-
-function SummaryPage() {
-    const [data, setData] = useState<OverviewSummaryResponse | null>(null);
+// Function หน้าภาพรวมตามช่วงวันที่แบบ realtime
+function SummaryPage(): JSX.Element {
+    const [data, setData] = useState<OverviewSummary | null>(null);
     const [loading, setLoading] = useState(true);
+    const [refreshing, setRefreshing] = useState(false);
     const [progress, setProgress] = useState(0);
     const [error, setError] = useState("");
-    const [isRealtime, setIsRealtime] = useState(false);
+    const [streamStatus, setStreamStatus] = useState<SseStatus>("connecting");
+    // แยกโหลดครั้งแรก (เต็มหน้า) กับเปลี่ยนช่วงวันที่ (ตัวบอกเล็ก)
+    const hasDataRef = useRef(false);
+    useEffect(() => {
+        hasDataRef.current = Boolean(data);
+    }, [data]);
 
     const [selectedRange, setSelectedRange] = useState<DateRange | undefined>();
 
@@ -78,229 +78,78 @@ function SummaryPage() {
         [selectedRange]
     );
 
+    const rangeQuery = useMemo<OverviewQuery>(
+        () => ({
+            ...(selectedStartDate ? { start_date: selectedStartDate } : {}),
+            ...(selectedEndDate ? { end_date: selectedEndDate } : {}),
+        }),
+        [selectedEndDate, selectedStartDate]
+    );
+
+    // ข้อมูลมาจาก stream แต่ละช่วงวันที่เปิด stream ของตัวเองและได้ snapshot ตอนต่อ
     useEffect(() => {
-        let ignore = false;
-        let timer: number | undefined;
 
-        async function fetchOverviewSummary() {
+        let received = false;
+        const isInitialLoad = !hasDataRef.current;
+        if (isInitialLoad) {
+            setLoading(true);
+            setProgress(30);
+        } else {
+            setRefreshing(true);
+        }
+        setError("");
+
+        function finishFirstLoad() {
+            if (received) return;
+            received = true;
+            setRefreshing(false);
+            setProgress(100);
+            setLoading(false);
+        }
+
+        // สำรองเท่านั้น ไม่ได้ snapshot ตามเวลาให้โหลดช่วงนี้ผ่าน API ครั้งเดียว
+        const fallbackTimer = window.setTimeout(async () => {
+            if (received) return;
             try {
-                setLoading(true);
-                setProgress(8);
-                setError("");
-
-                const token =
-                    typeof window !== "undefined" ? localStorage.getItem("token") : null;
-
-                const query = new URLSearchParams();
-
-                if (selectedStartDate) {
-                    query.set("start_date", selectedStartDate);
-                }
-
-                if (selectedEndDate) {
-                    query.set("end_date", selectedEndDate);
-                }
-
-                if (!ignore) {
-                    setProgress(18);
-                }
-
-                const response = await fetch(
-                    `/api/summary${query.toString() ? `?${query.toString()}` : ""}`,
-                    {
-                        method: "GET",
-                        headers: {
-                            Accept: "application/json",
-                            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-                        },
-                        cache: "no-store",
-                    }
-                );
-
-                if (!ignore) {
-                    setProgress(60);
-                }
-
-                const result = await response.json().catch(() => null);
-
-                if (!ignore) {
-                    setProgress(82);
-                }
-
-                if (!response.ok) {
-                    throw new Error(result?.message || "ไม่สามารถดึงข้อมูลภาพรวมได้");
-                }
-
-                if (!ignore) {
-                    setData(result as OverviewSummaryResponse);
-                    setProgress(100);
-                }
+                const result = await getOverview(rangeQuery);
+                if (!received) setData(result);
             } catch (err) {
-                if (!ignore) {
-                    setError(
-                        err instanceof Error
-                            ? err.message
-                            : "เกิดข้อผิดพลาดในการโหลดข้อมูล"
-                    );
-                    setProgress(100);
-                }
+                if (!received) setError(getErrorMessage(err, "เกิดข้อผิดพลาดในการโหลดข้อมูล"));
             } finally {
-                if (!ignore) {
-                    timer = window.setTimeout(() => {
-                        if (!ignore) {
-                            setLoading(false);
-                            setProgress(0);
-                        }
-                    }, 350);
-                }
+                finishFirstLoad();
             }
-        }
+        }, FIRST_SNAPSHOT_TIMEOUT_MS);
 
-        void fetchOverviewSummary();
+        const unsubscribe = subscribeOverviewEvents(rangeQuery, {
+            onStatusChange: setStreamStatus,
+            // เช่น 400 INVALID_DATE_RANGE แสดงข้อความและคงข้อมูลเดิม
+            onFatalError: (err) => {
+                setError(err.message);
+                finishFirstLoad();
+            },
+            onEvent: (event) => {
+                if (event.type === "overview_snapshot" || event.type === "overview_updated") {
+                    setData(event.data);
+                    setError("");
+                    finishFirstLoad();
+                    return;
+                }
+                if (event.type === "overview_error" && !received) {
+                    setError(event.message);
+                    finishFirstLoad();
+                }
+            },
+        });
 
         return () => {
-            ignore = true;
-
-            if (timer) {
-                window.clearTimeout(timer);
-            }
+            unsubscribe();
+            window.clearTimeout(fallbackTimer);
         };
-    }, [selectedEndDate, selectedStartDate]);
+    }, [rangeQuery]);
 
-    useEffect(() => {
-        const controller = new AbortController();
-        let reconnectTimer: number | undefined;
-
-        function buildEventsUrl() {
-            const query = new URLSearchParams();
-
-            if (selectedStartDate) {
-                query.set("start_date", selectedStartDate);
-            }
-
-            if (selectedEndDate) {
-                query.set("end_date", selectedEndDate);
-            }
-
-            return `/api/summary/events${query.toString() ? `?${query.toString()}` : ""}`;
-        }
-
-        function handleOverviewEvent(event: OverviewSseEvent) {
-            if (
-                event.type === "overview_snapshot" ||
-                event.type === "overview_summary" ||
-                event.type === "overview_updated"
-            ) {
-                setData(event.data);
-                setError("");
-                setIsRealtime(true);
-                return;
-            }
-
-            if (event.type === "overview_error") {
-                setIsRealtime(false);
-            }
-        }
-
-        async function connect() {
-            try {
-                const token = localStorage.getItem("token");
-                const response = await fetch(buildEventsUrl(), {
-                    headers: {
-                        Accept: "text/event-stream",
-                        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-                    },
-                    signal: controller.signal,
-                    cache: "no-store",
-                });
-
-                if (!response.ok || !response.body) {
-                    const result = await response.json().catch(() => null);
-                    const message = getErrorMessage(
-                        result,
-                        response.status === 400
-                            ? "Invalid overview date range"
-                            : response.status === 401
-                                ? "Unauthorized"
-                                : response.status === 403
-                                    ? "Forbidden"
-                                    : "Overview event stream unavailable"
-                    );
-
-                    if (
-                        response.status === 400 ||
-                        response.status === 401 ||
-                        response.status === 403
-                    ) {
-                        setIsRealtime(false);
-                        setError(message);
-                        return;
-                    }
-
-                    throw new Error(message);
-                }
-
-                setIsRealtime(true);
-
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder();
-                let buffer = "";
-
-                while (!controller.signal.aborted) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-
-                    buffer += decoder.decode(value, { stream: true });
-                    const chunks = buffer.split(/\r?\n\r?\n/);
-                    buffer = chunks.pop() ?? "";
-
-                    for (const chunk of chunks) {
-                        const dataText = chunk
-                            .split(/\r?\n/)
-                            .filter((line) => line.startsWith("data:"))
-                            .map((line) => line.slice(5).trim())
-                            .join("\n");
-
-                        if (!dataText) continue;
-
-                        const event = JSON.parse(dataText) as OverviewSseEvent;
-                        if (event.type === "connected" || event.type === "ping") {
-                            continue;
-                        }
-
-                        handleOverviewEvent(event);
-                    }
-                }
-
-                if (!controller.signal.aborted) {
-                    throw new Error("Overview event stream disconnected");
-                }
-            } catch {
-                if (controller.signal.aborted) return;
-
-                setIsRealtime(false);
-                reconnectTimer = window.setTimeout(connect, 5000);
-            }
-        }
-
-        void connect();
-
-        return () => {
-            controller.abort();
-
-            if (reconnectTimer) {
-                window.clearTimeout(reconnectTimer);
-            }
-        };
-    }, [selectedEndDate, selectedStartDate]);
-
-    function formatNumber(value: number) {
-        return new Intl.NumberFormat("en-US").format(value);
-    }
-
-    function formatCurrency(value: number) {
-        return `฿${new Intl.NumberFormat("en-US").format(value)}`;
-    }
+    const isRealtime = streamStatus === "open";
+    const formatNumber = formatCount;
+    const formatCurrency = formatBaht;
 
     function getRevenueDescription(group: OverviewRevenueGroup) {
         if (group.id === "staff") {
@@ -351,7 +200,7 @@ function SummaryPage() {
 
     if (loading) {
         return (
-            <Preload
+            <LoadingScreen
                 open
                 progress={progress}
                 message="กำลังโหลดข้อมูล..."
@@ -361,7 +210,7 @@ function SummaryPage() {
         );
     }
 
-    if (error || !data) {
+    if (!data) {
         return (
             <section className="min-h-screen bg-[#F3F4F6] px-5 py-6 md:px-8 md:py-8">
                 <div className="mx-auto max-w-[1320px] rounded-2xl border border-red-200 bg-red-50 px-5 py-4 text-red-600">
@@ -400,6 +249,14 @@ function SummaryPage() {
 
                 <div className="mb-5">
                     <DateRangeFilter value={selectedRange} onChange={setSelectedRange} />
+
+                    {error ? (
+                        <div className="mt-3 rounded-2xl border border-red-200 bg-red-50 px-5 py-3 text-[14px] text-red-600">
+                            {error}
+                        </div>
+                    ) : refreshing ? (
+                        <p className="mt-3 text-[13px] text-[#6B7280]">กำลังอัปเดตข้อมูล...</p>
+                    ) : null}
                 </div>
 
                 <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -414,7 +271,7 @@ function SummaryPage() {
                     <SummaryCard
                         title="ชำระเงินแล้ว"
                         value={formatNumber(data.summaryCards.paidCount)}
-                        note={`฿ ${formatNumber(data.summaryCards.paidRevenue)}.00 Total`}
+                        note={`฿ ${formatMoney(data.summaryCards.paidRevenue)} Total`}
                         icon={<LuCircleDollarSign size={16} />}
                     />
 
@@ -460,6 +317,7 @@ function SummaryPage() {
                         title="สถิติการใช้งานของผู้ใช้"
                         description={`ข้อมูลแสดงจำนวนผู้เข้าใช้บริการ (${data.usageChartLabel ?? "รายวัน"})`}
                         badgeLabel={data.usageChartLabel ?? "รายวัน"}
+                        mode={data.usageChartMode}
                         items={data.usageChart}
                     />
 

@@ -1,8 +1,12 @@
-import Preload from "@/src/app/components/Preload";
+// Import Library
+import type { JSX } from "react";
+// Import Components
+import { LoadingScreen } from "@/src/app/components/shared/LoadingScreen";
 
-function Loading() {
+// Function หน้าโหลดระหว่างเปลี่ยนหน้าใน /landing
+function Loading(): JSX.Element {
     return (
-        <Preload
+        <LoadingScreen
             open
             progress={72}
             message="กำลังโหลดข้อมูล..."

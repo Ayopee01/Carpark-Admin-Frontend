@@ -1,197 +1,98 @@
 "use client";
-
-import { useEffect, useState } from "react";
-import {
-    BadgeCheck,
-    Clock3,
-    DoorOpen,
-    MonitorSmartphone,
-    QrCode,
-    Ticket,
-    UserRound,
-} from "lucide-react";
+// Import Library
+import { useEffect, useState, type JSX } from "react";
+import Link from "next/link";
+import { BadgeCheck, Clock3, DoorOpen, MonitorSmartphone, QrCode, Ticket, UserRound } from "lucide-react";
 import { LuReceiptText, LuTrendingUp } from "react-icons/lu";
+// Import Components
+import { LoadingScreen } from "@/src/app/components/shared/LoadingScreen";
+import { RevenueGroupCard, SummaryCard } from "@/src/app/components/shared/StatCards";
+import { ChannelCard } from "@/src/app/components/dashboard/ChannelCard";
+// Import Api
+import { getDashboard, subscribeDashboardEvents } from "@/src/app/lib/api/dashboard";
+// Import Types
+import type { SseStatus } from "@/src/app/type/api/common";
+// Import Shared
+import { getErrorMessage } from "@/src/app/lib/shared/http";
 
-import Preload from "@/src/app/components/Preload";
-import SummaryCard from "@/src/app/components/dashboard/SummaryCard";
-import RevenueGroupCard from "@/src/app/components/dashboard/RevenueGroupCard";
-import ChannelCard from "@/src/app/components/dashboard/ChannelCard";
+/* -------------------------------------- Config -------------------------------------- */
 
-import type {
-    DashboardChannelItem,
-    DashboardResponse,
-    DashboardRevenueGroup,
-    DashboardSseEvent,
-} from "@/src/app/type/dashboard/dashboard";
+// Config รอ snapshot แรกจาก SSE ก่อนโหลดผ่าน API แทน
+const FIRST_SNAPSHOT_TIMEOUT_MS = 8000;
+import { formatBaht, formatCount, formatMoney } from "@/src/app/lib/shared/format";
+import { REFUNDS_PATH } from "@/src/app/lib/landing/checkPayment";
+import type { DashboardChannelBreakdown, DashboardRevenueGroup, DashboardSummary } from "@/src/app/type/api/dashboard";
 
-function DashboardPage() {
-    const [data, setData] = useState<DashboardResponse | null>(null);
+// Config ชื่อที่แสดงของกลุ่มรายได้
+const REVENUE_GROUP_LABELS: Record<DashboardRevenueGroup["id"], string> = {
+    staff: "ชำระผ่านพนักงาน",
+    scan: "สแกนจ่าย",
+};
+
+/* -------------------------------------- Component -------------------------------------- */
+
+// Function หน้า dashboard สรุปยอดของวันนี้แบบ realtime
+function DashboardPage(): JSX.Element {
+    const [data, setData] = useState<DashboardSummary | null>(null);
     const [loading, setLoading] = useState(true);
     const [progress, setProgress] = useState(0);
     const [error, setError] = useState("");
+    const [streamStatus, setStreamStatus] = useState<SseStatus>("connecting");
 
+    // ข้อมูลมาจาก stream snapshot ทุกครั้งที่ต่อ และ updated แทนทั้งชุด (รวมตอนข้ามวัน) ไม่ต้อง GET ตอนเปิดหน้า
     useEffect(() => {
-        let ignore = false;
-        let timer: number | undefined;
+        let received = false;
+        setProgress(30);
 
-        async function fetchDashboard() {
+        function finishFirstLoad() {
+            if (received) return;
+            received = true;
+            setProgress(100);
+            setLoading(false);
+        }
+
+        // สำรองเท่านั้น ไม่ได้ snapshot ตามเวลาให้โหลดผ่าน API ครั้งเดียว
+        const fallbackTimer = window.setTimeout(async () => {
+            if (received) return;
             try {
-                setLoading(true);
-                setProgress(8);
-                setError("");
-
-                const token =
-                    typeof window !== "undefined" ? localStorage.getItem("token") : null;
-
-                setProgress(18);
-
-                const response = await fetch("/api/dashboard", {
-                    method: "GET",
-                    headers: {
-                        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-                    },
-                    cache: "no-store",
-                });
-
-                if (!ignore) {
-                    setProgress(60);
-                }
-
-                const result = await response.json().catch(() => null);
-
-                if (!ignore) {
-                    setProgress(82);
-                }
-
-                if (!response.ok) {
-                    throw new Error(
-                        result?.message || "ไม่สามารถดึงข้อมูล Dashboard ได้"
-                    );
-                }
-
-                if (!ignore) {
-                    setData(result as DashboardResponse);
-                    setProgress(100);
-                }
+                const result = await getDashboard();
+                if (!received) setData(result);
             } catch (err) {
-                if (!ignore) {
-                    setError(
-                        err instanceof Error
-                            ? err.message
-                            : "เกิดข้อผิดพลาดในการโหลดข้อมูล"
-                    );
-                    setProgress(100);
-                }
+                if (!received) setError(getErrorMessage(err, "เกิดข้อผิดพลาดในการโหลดข้อมูล"));
             } finally {
-                if (!ignore) {
-                    timer = window.setTimeout(() => {
-                        if (!ignore) {
-                            setLoading(false);
-                            setProgress(0);
-                        }
-                    }, 350);
-                }
+                finishFirstLoad();
             }
-        }
+        }, FIRST_SNAPSHOT_TIMEOUT_MS);
 
-        fetchDashboard();
+        const unsubscribe = subscribeDashboardEvents({
+            onStatusChange: setStreamStatus,
+            onFatalError: (err) => {
+                setError(err.message);
+                finishFirstLoad();
+            },
+            onEvent: (event) => {
+                if (event.type === "dashboard_snapshot" || event.type === "dashboard_updated") {
+                    setData(event.data);
+                    setError("");
+                    finishFirstLoad();
+                    return;
+                }
+                // สนใจเฉพาะก่อนได้ข้อมูลแรก หลังจากนั้นคงข้อมูลเดิมไว้
+                if (event.type === "dashboard_error" && !received) {
+                    setError(event.message);
+                    finishFirstLoad();
+                }
+            },
+        });
 
         return () => {
-            ignore = true;
-
-            if (timer) {
-                window.clearTimeout(timer);
-            }
+            unsubscribe();
+            window.clearTimeout(fallbackTimer);
         };
     }, []);
 
-    useEffect(() => {
-        const controller = new AbortController();
-        let reconnectTimer: number | undefined;
-        let pollingTimer: number | undefined;
-
-        async function pollDashboard() {
-            try {
-                const response = await fetch("/api/dashboard", { signal: controller.signal });
-                if (response.ok) {
-                    setData((await response.json()) as DashboardResponse);
-                }
-            } catch {
-                // The next polling interval retries automatically.
-            }
-        }
-
-        function startPolling() {
-            if (pollingTimer) return;
-            void pollDashboard();
-            pollingTimer = window.setInterval(pollDashboard, 30000);
-        }
-
-        async function connect() {
-            try {
-                const token = localStorage.getItem("token");
-                const response = await fetch("/api/dashboard/events", {
-                    headers: {
-                        Accept: "text/event-stream",
-                        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-                    },
-                    signal: controller.signal,
-                });
-                if (!response.ok || !response.body) throw new Error("SSE unavailable");
-
-                if (pollingTimer) {
-                    window.clearInterval(pollingTimer);
-                    pollingTimer = undefined;
-                }
-
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder();
-                let buffer = "";
-
-                while (!controller.signal.aborted) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    buffer += decoder.decode(value, { stream: true });
-                    const chunks = buffer.split(/\r?\n\r?\n/);
-                    buffer = chunks.pop() ?? "";
-
-                    for (const chunk of chunks) {
-                        const dataText = chunk
-                            .split(/\r?\n/)
-                            .filter((line) => line.startsWith("data:"))
-                            .map((line) => line.slice(5).trim())
-                            .join("\n");
-                        if (!dataText) continue;
-                        const event = JSON.parse(dataText) as DashboardSseEvent;
-                        if (
-                            event.type === "dashboard_snapshot" ||
-                            event.type === "dashboard_summary" ||
-                            event.type === "dashboard_updated"
-                        ) {
-                            setData(event.data);
-                        }
-                    }
-                }
-            } catch {
-                if (controller.signal.aborted) return;
-                startPolling();
-                reconnectTimer = window.setTimeout(connect, 5000);
-            }
-        }
-
-        void connect();
-        return () => {
-            controller.abort();
-            if (reconnectTimer) window.clearTimeout(reconnectTimer);
-            if (pollingTimer) window.clearInterval(pollingTimer);
-        };
-    }, []);
-
-    const formatNumber = (value: number) =>
-        new Intl.NumberFormat("en-US").format(value);
-
-    const formatCurrency = (value: number) =>
-        `฿${new Intl.NumberFormat("en-US").format(value)}`;
+    const formatNumber = formatCount;
+    const formatCurrency = formatBaht;
 
     const getRevenueDescription = (group: DashboardRevenueGroup) => {
         if (group.id === "staff") {
@@ -205,7 +106,7 @@ function DashboardPage() {
         return "ข้อมูลรายได้";
     };
 
-    const getChannelIcon = (icon: DashboardChannelItem["icon"]) => {
+    const getChannelIcon = (icon: DashboardChannelBreakdown["icon"]) => {
         switch (icon) {
             case "user":
                 return <UserRound className="h-4 w-4" strokeWidth={2.25} />;
@@ -222,7 +123,7 @@ function DashboardPage() {
 
     if (loading) {
         return (
-            <Preload
+            <LoadingScreen
                 open
                 progress={progress}
                 message="กำลังโหลดข้อมูล..."
@@ -242,6 +143,8 @@ function DashboardPage() {
         );
     }
 
+    const isLive = streamStatus === "open" && data.isRealtime;
+
     return (
         <section className="min-h-screen bg-gray-100 px-4 py-6 text-slate-700 md:px-8 md:py-8 xl:p-20">
             <div className="mx-auto max-w-7xl">
@@ -257,19 +160,32 @@ function DashboardPage() {
                     </div>
 
                     <div
-                        className={`flex h-10 items-center gap-2 rounded-full border bg-white px-4 py-2 text-xs font-semibold ${data.isRealtime
+                        className={`flex h-10 items-center gap-2 rounded-full border bg-white px-4 py-2 text-xs font-semibold ${isLive
                                 ? "border-green-100 text-green-600"
                                 : "border-slate-200 text-slate-500"
                             }`}
                     >
                         <span
-                            className={`h-2 w-2 rounded-full ${data.isRealtime ? "bg-green-500" : "bg-slate-400"
+                            className={`h-2 w-2 rounded-full ${isLive ? "bg-green-500" : "bg-slate-400"
                                 }`}
                         />
 
-                        <span>{data.isRealtime ? "Online" : "Offline"}</span>
+                        <span>{isLive ? "Online" : streamStatus === "reconnecting" ? "กำลังเชื่อมต่อใหม่..." : "Offline"}</span>
                     </div>
                 </div>
+
+                {data.pendingRefunds && data.pendingRefunds.count > 0 ? (
+                    <Link
+                        href={REFUNDS_PATH}
+                        className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-red-200 bg-red-50 px-5 py-4 text-red-700 transition hover:bg-red-100"
+                    >
+                        <span className="text-[15px] font-bold">
+                            {/* pendingRefunds.amount เป็นบาทแล้ว (หน้าคืนเงินใช้สตางค์) */}
+                            รอคืนเงิน {formatCount(data.pendingRefunds.count)} รายการ ({formatMoney(data.pendingRefunds.amount)} บาท)
+                        </span>
+                        <span className="text-[13px] font-semibold underline">ดูรายการรอคืนเงิน</span>
+                    </Link>
+                ) : null}
 
                 <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
                     <SummaryCard
@@ -286,7 +202,7 @@ function DashboardPage() {
                     <SummaryCard
                         title="ชำระเงินแล้ว"
                         value={formatNumber(data.summaryCards.paidCount)}
-                        note={`฿ ${formatNumber(data.summaryCards.paidRevenue)}.00 Total`}
+                        note={`฿ ${formatMoney(data.summaryCards.paidRevenue)} Total`}
                         icon={<BadgeCheck className="h-4 w-4" strokeWidth={2.25} />}
                     />
 
@@ -312,7 +228,7 @@ function DashboardPage() {
                         {data.revenueGroups.map((group) => (
                             <RevenueGroupCard
                                 key={group.id}
-                                title={group.label}
+                                title={REVENUE_GROUP_LABELS[group.id] ?? group.id}
                                 description={getRevenueDescription(group)}
                                 amountText={formatCurrency(group.amount)}
                                 percent={group.percent}

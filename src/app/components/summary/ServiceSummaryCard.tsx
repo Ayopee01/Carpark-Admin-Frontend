@@ -1,23 +1,18 @@
 "use client";
+// Import Library
+import type { JSX } from "react";
+import { LuDoorOpen, LuMonitorSmartphone, LuQrCode, LuWalletCards } from "react-icons/lu";
+// Import Types
+import type { ServiceSummaryCardProps } from "@/src/app/type/ui/summary";
+import type { OverviewServiceSummaryItem } from "@/src/app/type/api/overview";
+// Import Shared
+import { formatMoney } from "@/src/app/lib/shared/format";
 
-import {
-    LuDoorOpen,
-    LuMonitorSmartphone,
-    LuQrCode,
-    LuWalletCards,
-} from "react-icons/lu";
-import type { OverviewServiceSummaryItem } from "@/src/app/type/summary/summary";
+// Function แปลงจำนวนเงินเป็นข้อความทศนิยม 2 ตำแหน่ง
+const formatCurrency = formatMoney;
 
-type Props = {
-    items: OverviewServiceSummaryItem[];
-    totalAmount: number;
-};
-
-function formatCurrency(value: number) {
-    return new Intl.NumberFormat("en-US").format(value);
-}
-
-function getServiceIcon(icon: OverviewServiceSummaryItem["icon"]) {
+// Function เลือกไอคอนตามรหัสบริการ
+function getServiceIcon(icon: OverviewServiceSummaryItem["icon"]): JSX.Element {
     switch (icon) {
         case "cash":
             return <LuWalletCards size={16} />;
@@ -32,7 +27,8 @@ function getServiceIcon(icon: OverviewServiceSummaryItem["icon"]) {
     }
 }
 
-function ServiceSummaryCard({ items, totalAmount }: Props) {
+// Function การ์ดสรุปยอดเงินแยกตามบริการ
+function ServiceSummaryCard({ items, totalAmount }: ServiceSummaryCardProps): JSX.Element {
     return (
         <article className="min-w-0 rounded-[18px] bg-[#E4E6E8] p-4 md:p-6">
             <h3 className="text-[16px] font-bold text-[#1F2937] sm:text-[18px]">
@@ -82,4 +78,4 @@ function ServiceSummaryCard({ items, totalAmount }: Props) {
     );
 }
 
-export default ServiceSummaryCard;
+export { ServiceSummaryCard };

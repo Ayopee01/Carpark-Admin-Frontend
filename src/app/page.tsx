@@ -1,15 +1,9 @@
-"use client"
+// Import Library
+import { redirect } from "next/navigation";
 
-// Components
-import Dashboard from "./landing/login/page";
-
-// ----------------------------------- UI -----------------------------------
-function Page() {
-  return (
-    <>
-      <Dashboard />
-    </>
-  )
+// Function หน้า / ส่งไปหน้า login ให้หน้า login ตัดสินว่าจะไปต่อที่ไหน
+function Page(): never {
+  redirect("/landing/login");
 }
 
-export default Page
+export default Page;

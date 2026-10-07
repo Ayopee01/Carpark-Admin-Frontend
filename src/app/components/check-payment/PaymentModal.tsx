@@ -1,271 +1,134 @@
 "use client";
+// Import Library
+import { useEffect, useMemo, useRef, useState, type JSX } from "react";
+import Link from "next/link";
+import { LuBanknote, LuCreditCard, LuQrCode } from "react-icons/lu";
+// Import Components
+import { FeeBreakdownList } from "@/src/app/components/check-payment/FeeBreakdownList";
+// Import Providers
+import { useRefundAlerts } from "@/src/app/providers/RefundAlertsProvider";
+// Import Api
+import { createCharge, getChargeQrImage, getEdcTerminals, getPaymentMethods, verifyCharge } from "@/src/app/lib/api/payments";
+import { getTransactionByPlate, payTransaction } from "@/src/app/lib/api/transactions";
+// Import Auth
+import { FORBIDDEN_EVENT } from "@/src/app/lib/auth/fetchInterceptor";
+import { handleSessionRevoked, refreshSession } from "@/src/app/lib/auth/session";
+// Import Landing
+import { ADMIN_CHANNEL_CODE, CARD_METHOD_ID, CASH_METHOD_ID, NO_ADMIN_PAYMENT_OPTIONS, REFUNDS_PATH, REFUND_REASON_LABELS, SCAN_METHOD_ID, resolveAdminPaymentOptions } from "@/src/app/lib/landing/checkPayment";
+// Import Types
+import type { PaymentModalProps, ActiveCharge, AdminPaymentOptions, PaymentDetail, PaymentMode, PendingChargeDialog, PendingGatewayCharge, ScanAlert } from "@/src/app/type/ui/checkPayment";
+import type { EdcTerminal, PaymentSocketMessage, PaymentUpdatedEvent } from "@/src/app/type/api/payments";
+import type { AdminPaymentRequest, AdminPaymentResponse, PendingGatewayChargeDetails, Transaction } from "@/src/app/type/api/transactions";
+// Import Shared
+import { ApiError, getErrorMessage, getFieldErrors, getPaymentWebSocketUrl, isApiErrorCode } from "@/src/app/lib/shared/http";
+import { formatMoney, satangToBaht } from "@/src/app/lib/shared/format";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { LuBanknote, LuQrCode } from "react-icons/lu";
-import type {
-  AdminPaymentResponse,
-  PaymentRequest,
-  TransactionDetail,
-  TransactionItem,
-} from "@/src/app/type/check-payment/transactions";
-import type {
-  PaymentMethodsResponse,
-  ServiceChannelsResponse,
-} from "@/src/app/type/device/payment";
+/* -------------------------------------- Config -------------------------------------- */
 
-type TransactionDetailResponse = {
-  id: string;
-  billNo: string;
-  plateNo: string;
-  durationDisplay: string;
-  baseAmount: number;
-  netAmount: number;
-  paidAmount: number;
-  remainingAmount: number;
-  discountAmount: number;
-  payment: {
-    method: string | null;
-    qrCodeText: string | null;
-    qrCodeImageUrl: string | null;
-  };
-  receiptPreview?: {
-    printableText: string | null;
-    canPrint: boolean;
-  };
-};
+// Config key ใน localStorage ของเครื่อง EDC ที่พนักงานเลือกไว้ในเครื่องนี้
+const EDC_DEVICE_STORAGE_KEY = "adminEdcDeviceId";
 
-type RawTransactionDetailResponse = TransactionDetail;
+// Config error ที่เกิดจากเครื่อง EDC ที่เลือก ให้เลือกเครื่องใหม่ ไม่ต้อง void
+const EDC_SELECTION_ERRORS = new Set([
+  "EDC_DEVICE_REQUIRED",
+  "EDC_DEVICE_NOT_FOUND",
+  "EDC_DEVICE_NOT_CASHIER",
+  "EDC_DEVICE_UNAVAILABLE",
+]);
 
-type PaymentMode = "qr" | "cash";
+// Config ระยะรอก่อนต่อ WebSocket ใหม่แต่ละครั้ง
+const PAYMENT_WS_RECONNECT_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
 
-declare global {
-  interface Window {
-    Omise?: {
-      setPublicKey: (publicKey: string) => void;
-      createSource: (
-        type: "promptpay",
-        options: { amount: number; currency: "thb" },
-        callback: (statusCode: number, response: { id?: string; message?: string }) => void
-      ) => void;
-    };
+// Config close code 4401 (invalid_token = cookie หมดอายุ/ผิด หรือ reason ที่ session จบ)
+const WS_CLOSE_UNAUTHORIZED = 4401;
+
+// Config close code 4403 (forbidden = ไม่มีสิทธิ์ transactions, origin_not_allowed = ADMIN_ORIGINS)
+const WS_CLOSE_FORBIDDEN = 4403;
+
+// Config รอหลัง QR หมดอายุก่อนขอให้ backend ตรวจ charge อีกครั้ง
+const EXPIRED_QR_VERIFY_DELAY_MS = 15_000;
+
+/* -------------------------------------- Helpers -------------------------------------- */
+
+// Function อ่านเครื่อง EDC ที่จำไว้ (อ่านไม่ได้ = ไม่มี)
+function readStoredEdcDeviceId(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    return localStorage.getItem(EDC_DEVICE_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
   }
 }
 
-type OmiseConfigResponse = {
-  publicKey: string;
-  paymentWebSocketUrl: string;
-};
-
-type OmiseChargeResponse = {
-  message: string;
-  charge: {
-    provider: "omise";
-    chargeId: string;
-    status: string;
-    amount: number;
-    currency: "thb" | string;
-    plateNo: string;
-    method: "promptpay" | string;
-    channel: string;
-    authorizeUri?: string | null;
-    authorize_uri?: string | null;
-  };
-};
-
-type OmisePaymentUpdatedEvent = {
-  type: "payment_updated";
-  provider: "omise";
-  chargeId: string;
-  plateNo: string;
-  paymentStatus: "successful" | "failed" | "expired" | string;
-  transactionStatus: string;
-  remainingAmount: number;
-  exitTimeLimit: string | null;
-};
-
-type Props = {
-  open: boolean;
-  transactionId: string | null;
-  transaction?: TransactionItem | null;
-  onClose: () => void;
-  onSuccess: () => Promise<void> | void;
-};
-
-function formatCurrency(value: number) {
-  return value.toFixed(2);
+// Function จำเครื่อง EDC ที่เลือก (ค่าว่าง = ลบ)
+function storeEdcDeviceId(value: string): void {
+  try {
+    if (value) localStorage.setItem(EDC_DEVICE_STORAGE_KEY, value);
+    else localStorage.removeItem(EDC_DEVICE_STORAGE_KEY);
+  } catch {
+    // จำไม่ได้ ให้พนักงานเลือกใหม่ครั้งหน้า
+  }
 }
 
-const OMISE_SCRIPT_SRC = "https://cdn.omise.co/omise.js";
-const OMISE_PROMPTPAY_MIN_AMOUNT = 20;
+// Function แปลงจำนวนเงินเป็นข้อความทศนิยม 2 ตำแหน่ง
+const formatCurrency = formatMoney;
 
-function loadOmiseScript() {
-  return new Promise<void>((resolve, reject) => {
-    if (window.Omise) {
-      resolve();
-      return;
-    }
-
-    const existingScript = document.querySelector<HTMLScriptElement>(
-      `script[src="${OMISE_SCRIPT_SRC}"]`
-    );
-
-    if (existingScript) {
-      existingScript.addEventListener("load", () => resolve(), { once: true });
-      existingScript.addEventListener(
-        "error",
-        () => reject(new Error("Unable to load Omise.js")),
-        { once: true }
-      );
-      return;
-    }
-
-    const script = document.createElement("script");
-    script.src = OMISE_SCRIPT_SRC;
-    script.async = true;
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error("Unable to load Omise.js"));
-    document.body.appendChild(script);
-  });
+// Function แปลงช่องจำนวนเงินเป็นตัวเลขทศนิยมไม่เกิน 2 ตำแหน่ง (ผิดรูปแบบ = NaN)
+function parseMoneyInput(value: string): number {
+  const trimmed = value.trim();
+  if (!/^\d+(\.\d{1,2})?$/.test(trimmed)) return Number.NaN;
+  return Number(trimmed);
 }
 
-function createPromptPaySource(amountSatang: number) {
-  return new Promise<string>((resolve, reject) => {
-    if (!window.Omise) {
-      reject(new Error("Omise.js is not ready"));
-      return;
-    }
-
-    window.Omise.createSource(
-      "promptpay",
-      {
-        amount: amountSatang,
-        currency: "thb",
-      },
-      (statusCode, response) => {
-        if (statusCode >= 200 && statusCode < 300 && response.id) {
-          resolve(response.id);
-          return;
-        }
-
-        reject(new Error(response.message || "Unable to create PromptPay source"));
-      }
-    );
-  });
-}
-
-function toSatang(amount: number) {
-  return Math.round(amount * 100);
-}
-
-function buildPaymentWebSocketUrl(baseUrl: string, chargeId: string, token?: string | null) {
+// Function สร้าง URL ของ WebSocket ชำระเงิน (browser แนบ cookie เอง backend ตรวจ Origin)
+function buildPaymentWebSocketUrl(baseUrl: string, chargeId: string): string {
   const url = new URL(baseUrl);
   url.searchParams.set("chargeId", chargeId);
-  url.searchParams.set("channel", "cashier");
-
-  if (token) {
-    url.searchParams.set("token", token);
-  }
-
   return url.toString();
 }
 
-function resolveOmiseQrImage(charge?: OmiseChargeResponse["charge"] | null) {
-  if (!charge?.chargeId) return null;
-
-  return `/api/admin/payment/omise/qr?chargeId=${encodeURIComponent(charge.chargeId)}`;
-}
-
-function getBackendErrorMessage(
-  response: Response,
-  result: { message?: string } | null,
-  fallbackMessage: string
-) {
-  if (result?.message) return result.message;
-  if (response.status === 401) return "Unauthorized";
-  if (response.status === 403) return "Forbidden";
-  return fallbackMessage;
-}
-
-function resolvePaymentMode(value?: string | null): PaymentMode | null {
-  const normalized = value?.trim().toLowerCase();
-
-  if (!normalized) return null;
-  if (normalized === "cash" || normalized.includes("เงินสด")) return "cash";
-  if (normalized === "qr" || normalized.includes("qr") || normalized.includes("คิวอาร์")) return "qr";
-
-  return null;
-}
-
-function getMethodMode(method: { id: string; label: string; icon?: string; method?: string; action?: string }) {
-  return (
-    resolvePaymentMode(method.method) ??
-    resolvePaymentMode(method.action) ??
-    resolvePaymentMode(method.icon) ??
-    resolvePaymentMode(method.id) ??
-    resolvePaymentMode(method.label)
-  );
-}
-
-function encodePathSegment(value: string) {
-  return encodeURIComponent(value);
-}
-
-function getAvailablePaymentModes(
-  methods: PaymentMethodsResponse | null,
-  channels: ServiceChannelsResponse | null
-) {
-  const activeMethods = methods?.data?.filter((method) => method.isActive) ?? [];
-  const activeMethodModes = new Set<PaymentMode>();
-  const activeMethodKeys = new Map<string, PaymentMode>();
-
-  if ((methods?.data?.length ?? 0) === 0) {
-    return ["qr", "cash"] satisfies PaymentMode[];
+// Function แปลงข้อความจาก WebSocket (ไม่ใช่ JSON ที่มี type = null)
+function parseSocketMessage(raw: unknown): PaymentSocketMessage | null {
+  if (typeof raw !== "string") return null;
+  try {
+    const data: unknown = JSON.parse(raw);
+    return data && typeof data === "object" && typeof (data as { type?: unknown }).type === "string"
+      ? (data as PaymentSocketMessage)
+      : null;
+  } catch {
+    return null;
   }
-
-  activeMethods.forEach((method) => {
-    const mode = getMethodMode(method);
-
-    if (!mode) return;
-
-    activeMethodModes.add(mode);
-    [method.id, method.method, method.action, method.icon, method.label].forEach((key) => {
-      if (key) activeMethodKeys.set(key.toLowerCase(), mode);
-    });
-  });
-
-  const cashierChannel = (channels?.data ?? []).find(
-    (item) => item.id === "cashier" || item.name.toLowerCase().includes("cashier")
-  );
-
-  if (!cashierChannel) {
-    return Array.from(activeMethodModes);
-  }
-
-  const allowedModes = new Set<PaymentMode>();
-
-  cashierChannel.allowedMethods.forEach((methodKey) => {
-    const mode =
-      resolvePaymentMode(methodKey) ??
-      activeMethodKeys.get(methodKey.toLowerCase()) ??
-      null;
-
-    if (mode && activeMethodModes.has(mode)) {
-      allowedModes.add(mode);
-    }
-  });
-
-  return allowedModes.size > 0
-    ? Array.from(allowedModes)
-    : Array.from(activeMethodModes);
 }
 
-function sumPaidAmount(raw: RawTransactionDetailResponse) {
-  return raw.payments.reduce((sum, payment) => {
-    return sum + (payment.paidAmount ?? payment.amount ?? 0);
-  }, 0);
+// Function อ่าน QR ที่รอจ่ายจาก error 409 PENDING_GATEWAY_CHARGE (amount เป็นสตางค์)
+function readPendingGatewayCharge(err: ApiError): PendingGatewayCharge {
+  // รายละเอียดอยู่ข้าง message/code อ่านทีละค่าและตรวจ type
+  const details = (err.data ?? {}) as Partial<Record<keyof PendingGatewayChargeDetails, unknown>>;
+  return {
+    chargeId: String(details.chargeId ?? ""),
+    amount: Number(details.amount ?? 0),
+    expiresAt: typeof details.expiresAt === "string" ? details.expiresAt : null,
+    method: String(details.method ?? SCAN_METHOD_ID),
+    channel: String(details.channel ?? ADMIN_CHANNEL_CODE),
+  };
 }
 
-function addUnit(date: Date, unit: "year" | "month" | "day" | "hour" | "minute") {
+// Function รายการวิธีชำระที่เปิดใช้ qr = สแกนจ่าย PromptPay, cash = เงินสด, card = EDC
+function getAvailablePaymentModes(options: AdminPaymentOptions): PaymentMode[] {
+  const modes: PaymentMode[] = [];
+  if (options.scan.enabled) modes.push("qr");
+  if (options.cash.enabled) modes.push("cash");
+  if (options.card.enabled) modes.push("card");
+  return modes;
+}
+
+// Function รวมยอดที่จ่ายแล้วของ transaction
+function sumPaidAmount(raw: Transaction): number {
+  return raw.payments.reduce((sum, payment) => sum + (payment.paidAmount ?? 0), 0);
+}
+
+// Function บวกเวลา 1 หน่วยให้วันที่
+function addUnit(date: Date, unit: "year" | "month" | "day" | "hour" | "minute"): Date {
   const next = new Date(date);
 
   if (unit === "year") next.setFullYear(next.getFullYear() + 1);
@@ -277,11 +140,12 @@ function addUnit(date: Date, unit: "year" | "month" | "day" | "hour" | "minute")
   return next;
 }
 
+// Function นับจำนวนหน่วยปฏิทินเต็มที่อยู่ระหว่างสองเวลา
 function countCalendarUnit(
   cursor: Date,
   end: Date,
   unit: "year" | "month" | "day" | "hour" | "minute"
-) {
+): { count: number; cursor: Date } {
   let count = 0;
   let next = addUnit(cursor, unit);
 
@@ -294,7 +158,8 @@ function countCalendarUnit(
   return { count, cursor };
 }
 
-function formatDurationFromMinutes(totalMinutes: number) {
+// Function แปลงจำนวนนาทีเป็นข้อความระยะเวลา
+function formatDurationFromMinutes(totalMinutes: number): string {
   let remaining = Math.max(0, Math.floor(totalMinutes));
   const years = Math.floor(remaining / (365 * 24 * 60));
   remaining -= years * 365 * 24 * 60;
@@ -308,13 +173,14 @@ function formatDurationFromMinutes(totalMinutes: number) {
   return formatDurationParts({ years, months, days, hours, minutes });
 }
 
+// Function สร้างข้อความระยะเวลาจากปี เดือน วัน ชั่วโมง นาที
 function formatDurationParts(parts: {
   years: number;
   months: number;
   days: number;
   hours: number;
   minutes: number;
-}) {
+}): string {
   const labels = [
     parts.years ? `${parts.years} ปี` : "",
     parts.months ? `${parts.months} เดือน` : "",
@@ -326,7 +192,8 @@ function formatDurationParts(parts: {
   return labels.length > 0 ? labels.join(" ") : "0 นาที";
 }
 
-function formatParkingDuration(raw: RawTransactionDetailResponse) {
+// Function สร้างข้อความระยะเวลาจอดของ transaction
+function formatParkingDuration(raw: Transaction): string {
   const start = raw.entryAt ? new Date(raw.entryAt) : null;
   const endSource = raw.exitAt ?? raw.calculatedAt;
   const end = endSource ? new Date(endSource) : new Date();
@@ -360,10 +227,11 @@ function formatParkingDuration(raw: RawTransactionDetailResponse) {
   });
 }
 
+// Function แปลง Transaction เป็นข้อมูลที่ dialog แสดง
 function normalizeDetail(
-  raw: RawTransactionDetailResponse,
+  raw: Transaction,
   fallbackId: string
-): TransactionDetailResponse {
+): PaymentDetail {
   const latestPayment = raw.payments.at(-1);
   const paidAmount = raw.totalPaid ?? sumPaidAmount(raw);
   const discountAmount = Math.max(raw.baseAmount - raw.netAmount, 0);
@@ -378,6 +246,12 @@ function normalizeDetail(
     paidAmount,
     remainingAmount: raw.remainingAmount,
     discountAmount,
+    status: raw.status,
+    paymentReferences: raw.payments
+      .map((payment) => payment.reference)
+      .filter((reference): reference is string => Boolean(reference)),
+    billableHours: raw.durationHour,
+    feeBreakdown: raw.feeBreakdown ?? null,
 
     payment: {
       method: latestPayment?.method ?? null,
@@ -392,14 +266,17 @@ function normalizeDetail(
   };
 }
 
+/* -------------------------------------- Component -------------------------------------- */
+
+// Function dialog รับชำระเงินสด QR PromptPay และบัตร EDC รอผล QR ผ่าน WebSocket
 function PaymentModal({
   open,
   transactionId,
   transaction,
   onClose,
   onSuccess,
-}: Props) {
-  const [detail, setDetail] = useState<TransactionDetailResponse | null>(null);
+}: PaymentModalProps): JSX.Element | null {
+  const [detail, setDetail] = useState<PaymentDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [mode, setMode] = useState<PaymentMode>("qr");
   const [printReceipt, setPrintReceipt] = useState(true);
@@ -407,16 +284,295 @@ function PaymentModal({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [availableMethods, setAvailableMethods] = useState<PaymentMode[]>([]);
-  const [omiseCharge, setOmiseCharge] =
-    useState<OmiseChargeResponse["charge"] | null>(null);
+  const [paymentOptions, setPaymentOptions] =
+    useState<AdminPaymentOptions>(NO_ADMIN_PAYMENT_OPTIONS);
+  const [omiseCharge, setOmiseCharge] = useState<ActiveCharge | null>(null);
   const [qrRequested, setQrRequested] = useState(false);
   const [qrRequestKey, setQrRequestKey] = useState(0);
   const [qrLoading, setQrLoading] = useState(false);
   const [qrError, setQrError] = useState("");
   const [qrImageObjectUrl, setQrImageObjectUrl] = useState("");
   const [paymentVerifyError, setPaymentVerifyError] = useState("");
+  // จ่ายบางส่วน (เฉพาะแอดมิน) ปิด = จ่ายยอดค้างทั้งหมด
+  const [partialPayment, setPartialPayment] = useState(false);
+  const [payAmountInput, setPayAmountInput] = useState("");
+  const [payAmountError, setPayAmountError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [reloadKey, setReloadKey] = useState(0);
+  const [now, setNow] = useState(() => Date.now());
+  const [pendingChargeDialog, setPendingChargeDialog] = useState<PendingChargeDialog | null>(null);
+  // ตั้งเมื่อแอดมินกด "รับเงินสด" เท่านั้น ใช้ได้กับการส่งครั้งเดียว
+  const confirmPendingChargeRef = useRef(false);
+  const [scanAlert, setScanAlert] = useState<ScanAlert | null>(null);
+  // charge ที่ให้ backend ตรวจอีกครั้งแล้วหลัง QR หมดอายุ
+  const autoVerifiedChargeRef = useRef<string | null>(null);
+  // ชำระด้วยบัตร EDC
+  const [cardReference, setCardReference] = useState("");
+  const [edcTerminals, setEdcTerminals] = useState<EdcTerminal[]>([]);
+  const [edcTerminalsError, setEdcTerminalsError] = useState("");
+  const [edcDeviceId, setEdcDeviceId] = useState(() => readStoredEdcDeviceId());
+  const [cardAmountInput, setCardAmountInput] = useState("");
+  const [cardFieldError, setCardFieldError] = useState("");
+  // สีแดง: ยอดที่รูดไม่ถูกบันทึก ต้อง void ที่เครื่อง EDC
+  const [cardAlert, setCardAlert] = useState("");
+  const [cardSuccess, setCardSuccess] = useState("");
+  // ไม่รู้ผลของ request (เน็ต/5xx) ต้องตรวจก่อนให้ส่งใหม่
+  const [cardNeedsVerify, setCardNeedsVerify] = useState(false);
   const paymentSocketRef = useRef<WebSocket | null>(null);
   const paymentFinalizedRef = useRef(false);
+  // โหลดรายละเอียดครั้งถัดไปห้ามสร้าง QR อัตโนมัติ (ให้แอดมินเลือกเอง)
+  const suppressAutoQrRef = useRef(false);
+  const submittingRef = useRef(false);
+  const loadedTransactionIdRef = useRef<string | null>(null);
+  const modeRef = useRef<PaymentMode>("qr");
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
+
+  // โหลดใหม่ทุกครั้ง เพราะแอดมินอาจแก้การตั้งค่าระหว่างเปิดหน้านี้
+  async function loadPaymentSettings() {
+    const result = await getPaymentMethods();
+
+    const options = resolveAdminPaymentOptions(result);
+    // card มีในรายการเมื่อมีเครื่อง EDC เคาน์เตอร์ที่ใช้ได้อย่างน้อยหนึ่งเครื่อง
+    if (options.card.enabled) void loadEdcTerminals();
+    const modes = getAvailablePaymentModes(options);
+    setPaymentOptions(options);
+    setAvailableMethods(modes);
+    return modes;
+  }
+
+  // ได้ payment_settings_updated จาก stream คืนเงิน ให้โหลดวิธีชำระใหม่
+  const { paymentSettingsVersion } = useRefundAlerts();
+  const seenSettingsVersionRef = useRef(paymentSettingsVersion);
+
+  useEffect(() => {
+    if (seenSettingsVersionRef.current === paymentSettingsVersion) return;
+    seenSettingsVersionRef.current = paymentSettingsVersion;
+    if (!open || !detail) return;
+
+    void (async () => {
+      try {
+        const modes = await loadPaymentSettings();
+        if (modes.includes(modeRef.current)) return;
+
+        if (modeRef.current === "card") {
+          // ปิดรับบัตรแล้ว ห้ามรูดเครื่อง EDC
+          setNotice("การรับบัตรถูกปิดแล้ว ห้ามรูดเครื่อง EDC หากรูดไปแล้วกรุณายกเลิกรายการ (void) ที่เครื่อง EDC");
+        } else {
+          setNotice("วิธีชำระเงินที่เลือกถูกปิดใช้งานแล้ว");
+        }
+        if (modeRef.current === "qr") {
+          closePaymentSocket();
+          setOmiseCharge(null);
+          setQrRequested(false);
+        }
+        if (modes[0]) setMode(modes[0]);
+      } catch {
+        // คงปุ่มเดิมไว้ backend ยังปฏิเสธวิธีที่ปิดอยู่ดี
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- react to the stream signal only
+  }, [paymentSettingsVersion]);
+
+  async function loadEdcTerminals() {
+    try {
+      setEdcTerminalsError("");
+      const list: EdcTerminal[] = (await getEdcTerminals()).data ?? [];
+      setEdcTerminals(list);
+
+      // เครื่องที่จำไว้ถูกลบหรือปิด ให้ลืมแล้วเลือกใหม่
+      setEdcDeviceId((current) => {
+        if (current && list.some((terminal) => terminal.deviceId === current)) return current;
+        const next = list.length === 1 ? list[0].deviceId : "";
+        storeEdcDeviceId(next);
+        return next;
+      });
+      return list;
+    } catch (err) {
+      setEdcTerminalsError(getErrorMessage(err, "โหลดรายการเครื่อง EDC ไม่สำเร็จ"));
+      return null;
+    }
+  }
+
+  // 400 PAYMENT_SELECTION_INVALID วิธีชำระถูกปิดหรือลบระหว่างนั้น
+  async function handlePaymentSelectionInvalid(reason: string) {
+    setError(`วิธีชำระเงินนี้ถูกปิดใช้งาน (${reason})`);
+    try {
+      const modes = await loadPaymentSettings();
+      if (!modes.includes(mode)) {
+        closePaymentSocket();
+        setOmiseCharge(null);
+        setQrError("");
+        setQrRequested(false);
+        if (modes[0]) setMode(modes[0]);
+      }
+    } catch {
+      // คงข้อความ error และปุ่มเดิมไว้
+    }
+  }
+
+  const qrExpiresAtMs = omiseCharge?.expiresAt ? Date.parse(omiseCharge.expiresAt) : NaN;
+  const qrMsLeft = Number.isNaN(qrExpiresAtMs) ? null : qrExpiresAtMs - now;
+  const qrExpired = qrMsLeft !== null && qrMsLeft <= 0;
+
+  // QR หมดอายุโดยไม่มีผลจาก WebSocket ให้ตรวจอีกครั้งหลังหมดอายุสักครู่ (Omise อาจยังตอบ pending)
+  useEffect(() => {
+    const chargeId = omiseCharge?.chargeId;
+    if (!open || !qrExpired || !chargeId || paymentFinalizedRef.current) return;
+    if (autoVerifiedChargeRef.current === chargeId) return;
+    const timer = window.setTimeout(() => {
+      if (paymentFinalizedRef.current) return;
+      autoVerifiedChargeRef.current = chargeId;
+      void verifyExpiredCharge(chargeId);
+    }, EXPIRED_QR_VERIFY_DELAY_MS);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once per expired charge
+  }, [open, qrExpired, omiseCharge?.chargeId]);
+
+  // นาฬิกานับถอยหลังของ QR ทุก 1 วินาที เฉพาะตอนมี QR
+  useEffect(() => {
+    if (!open || Number.isNaN(qrExpiresAtMs)) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [open, qrExpiresAtMs]);
+
+  function formatCountdown(ms: number) {
+    const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${String(seconds).padStart(2, "0")}`;
+  }
+
+  function getMinutesLeft(expiresAt: string | null) {
+    const time = expiresAt ? Date.parse(expiresAt) : NaN;
+    if (Number.isNaN(time)) return null;
+    return Math.max(1, Math.ceil((time - Date.now()) / 60_000));
+  }
+
+  // QR บนหน้าจอที่ลูกค้ายังจ่ายได้
+  function getActivePendingCharge(): PendingGatewayCharge | null {
+    if (!omiseCharge?.chargeId || qrExpired) return null;
+    if (omiseCharge.status && omiseCharge.status !== "pending") return null;
+    return {
+      chargeId: omiseCharge.chargeId,
+      amount: omiseCharge.amount,
+      expiresAt: omiseCharge.expiresAt ?? null,
+      method: omiseCharge.method,
+      channel: omiseCharge.channel,
+    };
+  }
+
+  // เปลี่ยนเป็นเงินสดระหว่างที่ QR ยังใช้ได้ ให้เตือนทันที
+  function handleSelectCashMode() {
+    const pending = getActivePendingCharge();
+    if (mode === "qr" && pending) {
+      setPendingChargeDialog({ ...pending, next: "switch_to_cash" });
+      return;
+    }
+    setMode("cash");
+  }
+
+  // เลือกบัตรระหว่างที่ QR ยังใช้ได้ ให้เตือนก่อนรูดบัตร
+  function handleSelectCardMode() {
+    const pending = getActivePendingCharge();
+    if (pending && !confirmPendingChargeRef.current) {
+      setPendingChargeDialog({ ...pending, next: "switch_to_card" });
+      return;
+    }
+    setMode("card");
+  }
+
+  function handleConfirmCashWithPendingCharge() {
+    const dialog = pendingChargeDialog;
+    if (!dialog) return;
+    setPendingChargeDialog(null);
+    confirmPendingChargeRef.current = true;
+
+    if (dialog.next === "switch_to_cash") {
+      setMode("cash");
+      return;
+    }
+    if (dialog.next === "switch_to_card") {
+      setMode("card");
+      return;
+    }
+    if (dialog.next === "resubmit_card") {
+      void handleConfirmCardPayment();
+      return;
+    }
+    void handleConfirmPayment();
+  }
+
+  // กดยกเลิก กลับไปที่ QR ที่รอจ่าย (อาจสร้างจากที่อื่น)
+  function handleCancelCashWithPendingCharge() {
+    const dialog = pendingChargeDialog;
+    setPendingChargeDialog(null);
+    confirmPendingChargeRef.current = false;
+    if (!dialog) return;
+
+    if (omiseCharge?.chargeId !== dialog.chargeId && detail) {
+      setQrError("");
+      setOmiseCharge({
+        chargeId: dialog.chargeId,
+        status: "pending",
+        amount: dialog.amount,
+        method: dialog.method,
+        channel: ADMIN_CHANNEL_CODE,
+        expiresAt: dialog.expiresAt,
+      });
+    }
+    setMode("qr");
+  }
+
+  // สแกนจ่ายแล้วต้องคืนเงิน คง dialog ไว้ให้แอดมินเห็น และโหลดรายการใหม่
+  function handleScanRefundRequired(event: PaymentUpdatedEvent) {
+    const refundBaht = formatCurrency(satangToBaht(event.refundAmount));
+    const reasonLabel = event.refundReason
+      ? REFUND_REASON_LABELS[event.refundReason] ?? event.refundReason
+      : "";
+
+    setScanAlert(
+      event.applied === false
+        ? {
+          tone: "danger",
+          message: `ลูกค้าจ่าย QR ซ้ำ ${refundBaht} บาท กรุณาคืนเงินลูกค้า${reasonLabel ? ` (${reasonLabel})` : ""}`,
+        }
+        : {
+          tone: "warning",
+          message: `ได้รับเงินเกิน ${refundBaht} บาท กรุณาคืนเงินลูกค้า`,
+        }
+    );
+    suppressAutoQrRef.current = true;
+    void Promise.resolve(onSuccess());
+    setReloadKey((value) => value + 1);
+  }
+
+  // ปกติผลมาทาง WebSocket จาก webhook ของ Omise ถ้าหมดอายุแล้วยังไม่มีผล ให้ backend ตรวจอีกครั้ง
+  async function verifyExpiredCharge(chargeId: string) {
+    try {
+      // ได้ pending ให้หยุด (ไม่วนซ้ำ) ผลจริงจะมาทาง payment_updated
+      const { action } = await verifyCharge(chargeId);
+      if (action === "already_processed") {
+        // บันทึกไปก่อนแล้ว จะไม่มี event ใหม่ ให้โหลดใหม่
+        suppressAutoQrRef.current = true;
+        void Promise.resolve(onSuccess());
+        setReloadKey((value) => value + 1);
+      }
+    } catch {
+      // ไม่ต้องทำอะไรต่อ แสดง QR ที่หมดอายุและให้สร้างใหม่ได้
+    }
+  }
+
+  // สแกนจ่ายสำเร็จแต่ค่าจอดเพิ่มระหว่างนั้น แสดงยอดคงเหลือให้เก็บต่อด้วย QR ใหม่หรือเงินสด
+  function handleScanPartiallyPaid(remainingAmount: number) {
+    setNotice(
+      `รับชำระผ่าน QR แล้ว แต่ยังมียอดคงเหลือ ${formatCurrency(remainingAmount)} บาท (ค่าบริการเพิ่มระหว่างสแกน) กรุณารับส่วนที่เหลือโดยสร้าง QR ใหม่หรือรับเงินสด`
+    );
+    suppressAutoQrRef.current = true;
+    void Promise.resolve(onSuccess());
+    setReloadKey((value) => value + 1);
+  }
 
   function closePaymentSocket() {
     paymentSocketRef.current?.close();
@@ -447,7 +603,8 @@ function PaymentModal({
 
     let ignore = false;
     const activeTransactionId = transactionId;
-    const fallbackPlateNo = transaction?.plateNo?.trim();
+    // GET /transactions/:plateNo ค้นด้วยทะเบียน ไม่ใช่ id
+    const plateNo = transaction?.plateNo?.trim();
 
     async function fetchDetail() {
       try {
@@ -458,67 +615,48 @@ function PaymentModal({
         setOmiseCharge(null);
         setQrImageObjectUrl("");
         paymentFinalizedRef.current = false;
-        setQrRequested(true);
+        setQrRequested(!suppressAutoQrRef.current);
+        suppressAutoQrRef.current = false;
         setQrRequestKey((value) => value + 1);
         setDetail(null);
         setCashReceived("0");
+        setPartialPayment(false);
+        setPayAmountInput("");
+        setPayAmountError("");
         closePaymentSocket();
 
-        const token = localStorage.getItem("token");
+        let settingsError = "";
+        const settingsPromise = loadPaymentSettings().catch((err: unknown) => {
+          settingsError = getErrorMessage(err, "โหลดการตั้งค่าวิธีชำระเงินไม่สำเร็จ");
+          setPaymentOptions(NO_ADMIN_PAYMENT_OPTIONS);
+          setAvailableMethods([]);
+          return [] as PaymentMode[];
+        });
 
-        const settingsPromise = Promise.all([
-          fetch("/api/devices/payment/methods", {
-            headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-          }),
-          fetch("/api/devices/payment/channels", {
-            headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-          }),
-        ]);
-
-        async function fetchTransactionDetail(id: string) {
-          return fetch(`/api/check-payment/transactions/${encodePathSegment(id)}`, {
-            method: "GET",
-            headers: {
-              Accept: "application/json",
-              ...(token ? { Authorization: `Bearer ${token}` } : {}),
-            },
-            cache: "no-store",
-          });
+        if (!plateNo) {
+          throw new Error("ไม่พบเลขทะเบียนของรายการนี้");
         }
 
-        let lookupId = fallbackPlateNo || activeTransactionId;
-        let res = await fetchTransactionDetail(lookupId);
-
-        if (res.status === 404 && activeTransactionId !== lookupId) {
-          lookupId = activeTransactionId;
-          res = await fetchTransactionDetail(lookupId);
-        }
-
-        const json = (await res.json().catch(() => null)) as
-          | RawTransactionDetailResponse
-          | null;
-
-        if (!res.ok || !json) {
-          throw new Error(
-            (json as { message?: string } | null)?.message ||
-            "ไม่สามารถโหลดรายละเอียดรายการได้"
-          );
-        }
-
-        const normalized = normalizeDetail(json, lookupId);
-        const [methodsResponse, channelsResponse] = await settingsPromise;
-        const methodsJson = (await methodsResponse.json().catch(() => null)) as PaymentMethodsResponse | null;
-        const channelsJson = (await channelsResponse.json().catch(() => null)) as ServiceChannelsResponse | null;
-        const allowed = getAvailablePaymentModes(methodsJson, channelsJson);
+        const json = await getTransactionByPlate(plateNo);
+        const normalized = normalizeDetail(json, activeTransactionId);
+        const allowed = await settingsPromise;
 
         if (!ignore) {
           setDetail(normalized);
-          setAvailableMethods(allowed);
-          setMode(
-            allowed.includes(normalized.payment.method === "cash" ? "cash" : "qr")
-              ? normalized.payment.method === "cash" ? "cash" : "qr"
-              : allowed[0] ?? "qr"
-          );
+          setCardAmountInput(String(normalized.remainingAmount));
+          if (settingsError) setError(settingsError);
+          // โหลดรายการเดิมซ้ำให้คงวิธีชำระเดิม ข้อความสำเร็จหรือ void จะยังแสดงอยู่
+          const isReload = loadedTransactionIdRef.current === activeTransactionId;
+          loadedTransactionIdRef.current = activeTransactionId;
+          const preferredMode: PaymentMode =
+            isReload
+              ? modeRef.current
+              : normalized.payment.method === "cash"
+                ? "cash"
+                : normalized.payment.method === CARD_METHOD_ID
+                  ? "card"
+                  : "qr";
+          setMode(allowed.includes(preferredMode) ? preferredMode : allowed[0] ?? "qr");
           setCashReceived("0");
         }
       } catch (err) {
@@ -537,7 +675,22 @@ function PaymentModal({
     return () => {
       ignore = true;
     };
-  }, [open, transaction?.plateNo, transactionId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reload only when the modal opens/reloads
+  }, [open, reloadKey, transaction?.plateNo, transactionId]);
+
+  useEffect(() => {
+    if (open) return;
+    setNotice("");
+    setScanAlert(null);
+    setPendingChargeDialog(null);
+    confirmPendingChargeRef.current = false;
+    loadedTransactionIdRef.current = null;
+    setCardReference("");
+    setCardFieldError("");
+    setCardAlert("");
+    setCardSuccess("");
+    setCardNeedsVerify(false);
+  }, [open]);
 
   useEffect(() => {
     if (!open || mode !== "qr" || !detail || detail.remainingAmount <= 0) return;
@@ -553,90 +706,49 @@ function PaymentModal({
         setQrLoading(true);
         setQrError("");
 
-        if (activeDetail.remainingAmount < OMISE_PROMPTPAY_MIN_AMOUNT) {
-          throw new Error(
-            `ยอดชำระผ่าน PromptPay ต้องไม่น้อยกว่า ${formatCurrency(
-              OMISE_PROMPTPAY_MIN_AMOUNT
-            )} บาท กรุณาเลือกรับชำระด้วยเงินสด`
-          );
-        }
-
-        const configResponse = await fetch("/api/admin/payment/omise/config", {
-          method: "GET",
-          cache: "no-store",
+        // backend สร้าง source และคำนวณยอดเอง ส่งแค่ transaction และ method promptpay
+        const { charge } = await createCharge({
+          transactionId: activeDetail.id,
+          method: SCAN_METHOD_ID,
         });
-        const config = (await configResponse.json().catch(() => null)) as
-          | OmiseConfigResponse
-          | { message?: string }
-          | null;
-
-        if (!configResponse.ok || !config || !("publicKey" in config)) {
-          throw new Error(
-            getBackendErrorMessage(
-              configResponse,
-              config as { message?: string } | null,
-              "Omise public key is not configured"
-            )
-          );
-        }
-
-        await loadOmiseScript();
-
-        if (!window.Omise) {
-          throw new Error("Omise.js is not ready");
-        }
-
-        window.Omise.setPublicKey(config.publicKey);
-        const sourceId = await createPromptPaySource(
-          toSatang(activeDetail.remainingAmount)
-        );
-
-        const token = localStorage.getItem("token");
-        const amountSatang = toSatang(activeDetail.remainingAmount);
-
-        const chargeResponse = await fetch("/api/admin/payment/omise/charge", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
-          body: JSON.stringify({
-            plateNo: activeDetail.plateNo,
-            source: sourceId,
-            sourceType: "promptpay",
-            method: "promptpay",
-            channel: "cashier",
-            transactionId: activeDetail.id,
-            amount: amountSatang,
-          }),
-          cache: "no-store",
-        });
-
-        const chargeResult = (await chargeResponse.json().catch(() => null)) as
-          | OmiseChargeResponse
-          | { message?: string }
-          | null;
-
-        if (
-          !chargeResponse.ok ||
-          !chargeResult ||
-          !("charge" in chargeResult)
-        ) {
-          throw new Error(
-            getBackendErrorMessage(
-              chargeResponse,
-              chargeResult as { message?: string } | null,
-              "Unable to create Omise charge"
-            )
-          );
-        }
 
         if (!cancelled) {
-          setOmiseCharge(chargeResult.charge);
+          setOmiseCharge(charge);
+          // QR เป็นยอดค้าง ณ ตอนสร้าง (บาท)
+          const balance = charge.transaction?.remainingAmount;
+          if (typeof balance === "number" && balance !== activeDetail.remainingAmount) {
+            setDetail((prev) => (prev ? { ...prev, remainingAmount: balance } : prev));
+          }
         }
       } catch (err) {
-        if (!cancelled) {
-          setQrError(err instanceof Error ? err.message : "Unable to create Omise QR");
+        if (cancelled) return;
+
+        // backend ตรวจการตั้งค่าก่อนสร้าง charge จึงยังไม่มี QR
+        if (isApiErrorCode(err, "PAYMENT_SELECTION_INVALID")) {
+          setQrError(err.message);
+          void handlePaymentSelectionInvalid(err.message);
+          return;
+        }
+
+        // ไม่มียอดค้างหรือรายการปิดไปแล้ว ให้โหลดใหม่
+        if (isApiErrorCode(err, "NO_REMAINING_AMOUNT", "TRANSACTION_NOT_PAYABLE")) {
+          setNotice(err.message);
+          suppressAutoQrRef.current = true;
+          void Promise.resolve(onSuccess());
+          setReloadKey((value) => value + 1);
+          return;
+        }
+
+        // ยอดเปลี่ยนหลังโหลดรายละเอียด ให้โหลดใหม่แล้วสร้าง QR ยอดปัจจุบัน
+        if (isApiErrorCode(err, "AMOUNT_MISMATCH")) {
+          setNotice("ยอดชำระเปลี่ยนแล้ว ระบบโหลดยอดล่าสุดให้แล้ว กรุณาสร้าง QR ใหม่");
+          suppressAutoQrRef.current = true;
+          setReloadKey((value) => value + 1);
+          return;
+        }
+
+        {
+          setQrError(getErrorMessage(err, "สร้าง QR PromptPay ไม่สำเร็จ"));
         }
       } finally {
         if (!cancelled) {
@@ -663,28 +775,9 @@ function PaymentModal({
 
     async function loadQrImage() {
       try {
-        const qrUrl = resolveOmiseQrImage(omiseCharge);
+        if (!omiseCharge?.chargeId) return;
 
-        if (!qrUrl) return;
-
-        const token = localStorage.getItem("token");
-        const response = await fetch(qrUrl, {
-          method: "GET",
-          headers: {
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
-          cache: "no-store",
-        });
-
-        if (!response.ok) {
-          const result = (await response.json().catch(() => null)) as
-            | { message?: string }
-            | null;
-
-          throw new Error(result?.message || "Unable to load Omise QR image");
-        }
-
-        const blob = await response.blob();
+        const blob = await getChargeQrImage(omiseCharge.chargeId);
         objectUrl = URL.createObjectURL(blob);
 
         if (!cancelled) {
@@ -692,7 +785,7 @@ function PaymentModal({
         }
       } catch (err) {
         if (!cancelled) {
-          setQrError(err instanceof Error ? err.message : "Unable to load Omise QR image");
+          setQrError(getErrorMessage(err, "โหลดรูป QR ไม่สำเร็จ"));
         }
       }
     }
@@ -709,39 +802,35 @@ function PaymentModal({
   }, [mode, omiseCharge, open]);
 
   useEffect(() => {
-    if (!open || mode !== "qr" || !omiseCharge?.chargeId) return;
+    // ไม่ผูกกับ mode เพราะลูกค้าอาจจ่าย QR ระหว่างแอดมินอยู่หน้าเงินสด
+    if (!open || !omiseCharge?.chargeId) return;
 
     let cancelled = false;
+    let reconnectAttempt = 0;
+    let reconnectTimer: number | undefined;
+    // refresh ได้ครั้งเดียวต่อการถูกปฏิเสธ ถูกปฏิเสธติดกัน 2 ครั้งจึงจบ session
+    let tokenRefreshed = false;
     const activeCharge = omiseCharge;
 
     async function connectPaymentSocket() {
       try {
-        const configResponse = await fetch("/api/admin/payment/omise/config", {
-          method: "GET",
-          cache: "no-store",
-        });
-        const config = (await configResponse.json().catch(() => null)) as
-          | OmiseConfigResponse
-          | null;
+        const paymentWebSocketUrl = getPaymentWebSocketUrl();
 
-        if (!configResponse.ok || !config?.paymentWebSocketUrl || cancelled) {
-          throw new Error("Payment WebSocket config is not available");
+        if (!paymentWebSocketUrl) {
+          throw new Error("ไม่พบการตั้งค่าการเชื่อมต่อสถานะการชำระเงิน");
         }
 
         closePaymentSocket();
-        const token = localStorage.getItem("token");
-        const socket = new WebSocket(
-          buildPaymentWebSocketUrl(
-            config.paymentWebSocketUrl,
-            activeCharge.chargeId,
-            token
-          )
-        );
+        const socket = new WebSocket(buildPaymentWebSocketUrl(paymentWebSocketUrl, activeCharge.chargeId));
         paymentSocketRef.current = socket;
 
         socket.onmessage = (message) => {
-          const data = JSON.parse(message.data) as OmisePaymentUpdatedEvent;
+          const data = parseSocketMessage(message.data);
 
+          if (data?.type === "error") {
+            setPaymentVerifyError(data.message || "การเชื่อมต่อสถานะการชำระเงินผิดพลาด");
+            return;
+          }
           if (data?.type !== "payment_updated") return;
           if (data.chargeId !== activeCharge.chargeId) return;
 
@@ -750,14 +839,37 @@ function PaymentModal({
 
             paymentFinalizedRef.current = true;
             closePaymentSocket();
+
+            if (data.refundRequired || data.applied === false) {
+              handleScanRefundRequired(data);
+              return;
+            }
+
+            if (data.transactionStatus === "partially_paid" && (data.remainingAmount ?? 0) > 0) {
+              handleScanPartiallyPaid(data.remainingAmount ?? 0);
+              return;
+            }
+
             void Promise.resolve(onSuccess()).finally(onClose);
             return;
           }
 
-          if (data.paymentStatus === "failed" || data.paymentStatus === "expired") {
+          if (data.paymentStatus === "expired") {
             closePaymentSocket();
-            setQrError("Omise payment failed");
+            setQrError("QR หมดอายุ");
+            return;
           }
+
+          if (data.paymentStatus === "failed" || data.paymentStatus === "reversed") {
+            closePaymentSocket();
+            setQrError("การชำระผ่าน QR ไม่สำเร็จ");
+          }
+        };
+
+        socket.onopen = () => {
+          reconnectAttempt = 0;
+          tokenRefreshed = false;
+          setPaymentVerifyError("");
         };
 
         socket.onerror = () => {
@@ -765,98 +877,72 @@ function PaymentModal({
             "กำลังรอตรวจสอบสถานะการชำระเงิน หากชำระแล้วระบบจะปิดรายการให้อัตโนมัติ"
           );
         };
+
+        // หลุดแล้วต่อใหม่ backend ส่งสถานะล่าสุดตอนต่อ จึงไม่พลาดผลระหว่างหลุด (ปิดเองไม่เข้ามาที่นี่)
+        socket.onclose = (event) => {
+          if (cancelled || paymentSocketRef.current !== socket || paymentFinalizedRef.current) return;
+          paymentSocketRef.current = null;
+
+          // ไม่ต่อใหม่ เพราะต่อใหม่ก็ไม่หาย
+          if (event.code === WS_CLOSE_FORBIDDEN) {
+            if (event.reason === "origin_not_allowed") {
+              // ปัญหาการตั้งค่า ADMIN_ORIGINS ของ API ไม่ใช่สิทธิ์ของผู้ใช้
+              setPaymentVerifyError("ระบบไม่อนุญาตให้เว็บไซต์นี้รับสถานะการชำระเงิน กรุณาติดต่อผู้ดูแลระบบ");
+              return;
+            }
+            setPaymentVerifyError("บัญชีนี้ไม่มีสิทธิ์รับชำระเงิน");
+            window.dispatchEvent(new CustomEvent(FORBIDDEN_EVENT));
+            return;
+          }
+
+          if (event.code === WS_CLOSE_UNAUTHORIZED) {
+            // access cookie หมดอายุหรือผิด ให้ refresh แล้วต่อใหม่ 1 ครั้ง
+            if (event.reason === "invalid_token" && !tokenRefreshed) {
+              tokenRefreshed = true;
+              refreshSession().then(
+                () => void connectPaymentSocket(),
+                () => undefined // refresh ถูกปฏิเสธ session.ts จบ session แล้ว
+              );
+              return;
+            }
+            // session จบแล้ว ไปหน้า login
+            handleSessionRevoked(event.reason === "invalid_token" ? "session_expired" : event.reason);
+            return;
+          }
+
+          // ไม่ใช่การถูกปฏิเสธเรื่อง auth (API restart, เน็ต) เริ่มนับใหม่
+          tokenRefreshed = false;
+          setPaymentVerifyError("การเชื่อมต่อหลุด กำลังเชื่อมต่อใหม่เพื่อรอผลการชำระเงิน...");
+          scheduleReconnect();
+        };
       } catch (err) {
-        if (!cancelled) {
-          setPaymentVerifyError(
-            err instanceof Error
-              ? err.message
-              : "กำลังรอตรวจสอบสถานะการชำระเงิน"
-          );
-        }
+        if (cancelled) return;
+        // ไม่ได้ตั้ง NEXT_PUBLIC_API_BASE_URL หรือ URL ผิด ต่อใหม่ก็ไม่หาย
+        setPaymentVerifyError(getErrorMessage(err, "กำลังรอตรวจสอบสถานะการชำระเงิน"));
       }
+    }
+
+    // รอ 1, 2, 5, 10 วินาที แล้วทุก 30 วินาทีตลอดที่ QR ยังเปิดอยู่
+    function scheduleReconnect() {
+      if (cancelled || paymentFinalizedRef.current) return;
+      const delay =
+        PAYMENT_WS_RECONNECT_DELAYS_MS[
+          Math.min(reconnectAttempt, PAYMENT_WS_RECONNECT_DELAYS_MS.length - 1)
+        ];
+      reconnectAttempt += 1;
+      window.clearTimeout(reconnectTimer);
+      reconnectTimer = window.setTimeout(() => void connectPaymentSocket(), delay);
     }
 
     void connectPaymentSocket();
 
     return () => {
       cancelled = true;
+      window.clearTimeout(reconnectTimer);
       closePaymentSocket();
     };
-  }, [mode, omiseCharge?.chargeId, onClose, onSuccess, open]);
-
-  useEffect(() => {
-    if (!open || mode !== "qr" || !detail || !omiseCharge?.chargeId) return;
-
-    let cancelled = false;
-    const paymentTargetId = detail.plateNo || detail.id || transactionId;
-
-    if (!paymentTargetId) return;
-    const activePaymentTargetId = paymentTargetId;
-
-    async function pollPaymentStatus() {
-      try {
-        const token = localStorage.getItem("token");
-        const response = await fetch(
-          `/api/check-payment/transactions/${encodePathSegment(activePaymentTargetId)}`,
-          {
-            method: "GET",
-            headers: {
-              Accept: "application/json",
-              ...(token ? { Authorization: `Bearer ${token}` } : {}),
-            },
-            cache: "no-store",
-          }
-        );
-
-        const json = (await response.json().catch(() => null)) as
-          | RawTransactionDetailResponse
-          | null;
-
-        if (!response.ok || !json || cancelled) return;
-
-        const normalized = normalizeDetail(json, activePaymentTargetId);
-        const paidByBackend =
-          normalized.remainingAmount <= 0 ||
-          json.status === "paid_waiting_exit" ||
-          json.status === "completed";
-
-        if (!paidByBackend || paymentFinalizedRef.current) return;
-
-        paymentFinalizedRef.current = true;
-        closePaymentSocket();
-        await Promise.resolve(onSuccess());
-
-        if (!cancelled) {
-          onClose();
-        }
-      } catch {
-        if (!cancelled) {
-          setPaymentVerifyError(
-            "กำลังรอตรวจสอบสถานะการชำระเงิน หากชำระแล้วระบบจะปิดรายการให้อัตโนมัติ"
-          );
-        }
-      }
-    }
-
-    const intervalId = window.setInterval(() => {
-      void pollPaymentStatus();
-    }, 3000);
-
-    void pollPaymentStatus();
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
-    };
-  }, [
-    detail,
-    mode,
-    omiseCharge?.chargeId,
-    onClose,
-    onSuccess,
-    open,
-    transactionId,
-  ]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one socket per charge
+  }, [omiseCharge?.chargeId, onClose, onSuccess, open]);
 
   useEffect(() => {
     if (!open) {
@@ -870,52 +956,204 @@ function PaymentModal({
 
   const receivedAmount = Number(cashReceived || 0);
 
-  const changeAmount = useMemo(() => {
+  // ยอดที่จ่ายครั้งนี้ ยอดที่กรอกเมื่อจ่ายบางส่วน หรือยอดค้างทั้งหมด
+  const payAmount = useMemo(() => {
     if (!detail) return 0;
-    return receivedAmount > detail.remainingAmount ? receivedAmount - detail.remainingAmount : 0;
-  }, [receivedAmount, detail]);
+    if (!partialPayment) return detail.remainingAmount;
+    const parsed = parseMoneyInput(payAmountInput);
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }, [detail, partialPayment, payAmountInput]);
 
-  async function submitAdminPayment(paymentMethod: "cash" | "promptpay" | "qr") {
+  const changeAmount = useMemo(() => {
+    return receivedAmount > payAmount ? receivedAmount - payAmount : 0;
+  }, [receivedAmount, payAmount]);
+
+  function validatePayAmount() {
+    if (!partialPayment) return "";
+    const parsed = parseMoneyInput(payAmountInput);
+    // ตรวจแค่รูปแบบตัวเลข กติกายอดเงิน backend ตรวจ
+    if (Number.isNaN(parsed)) return "กรุณากรอกจำนวนเงินให้ถูกต้อง (ทศนิยมไม่เกิน 2 ตำแหน่ง)";
+    return "";
+  }
+
+  function handleTogglePartialPayment() {
+    setPartialPayment((prev) => !prev);
+    setPayAmountInput(detail ? String(detail.remainingAmount) : "");
+    setPayAmountError("");
+  }
+
+  async function submitAdminPayment(
+    paymentMethod: "cash" | "promptpay" | "qr",
+    confirmPendingCharge: boolean
+  ) {
     if (!detail) {
       throw new Error("Missing transaction detail");
     }
 
-    const token = localStorage.getItem("token");
-    const paymentTargetId = detail.plateNo || detail.id || transactionId;
-
-    if (!paymentTargetId) {
-      throw new Error("Missing transaction id");
+    // POST /transactions/:plateNo/payment ต้องใช้ทะเบียนเต็ม
+    if (!detail.plateNo) {
+      throw new Error("ไม่พบเลขทะเบียนของรายการนี้");
     }
 
-    const payload: PaymentRequest = {
+    // ไม่ส่ง amount = จ่ายยอดค้างที่ backend คำนวณตอนจ่าย (อาจเพิ่มขึ้นหลังโหลดรายละเอียด)
+    const payload: AdminPaymentRequest = {
       method: paymentMethod,
-      channel: "cashier",
-      amount: detail.remainingAmount,
+      channel: ADMIN_CHANNEL_CODE,
+      ...(partialPayment ? { amount: parseMoneyInput(payAmountInput) } : {}),
+      // ส่งเฉพาะหลังแอดมินกด "รับเงินสด" ใน dialog QR ที่รอจ่าย
+      ...(confirmPendingCharge ? { confirmPendingCharge: true } : {}),
     };
 
-    const response = await fetch(
-      `/api/check-payment/transactions/${encodePathSegment(paymentTargetId)}/payment`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify(payload),
-      }
+    return payTransaction(detail.plateNo, payload);
+  }
+
+  function finishCardSuccess(reference: string, result: AdminPaymentResponse | null) {
+    const recordedReference = result?.data?.payment?.reference ?? reference;
+    const remaining = result?.data?.amount?.remainingAmount;
+    setCardNeedsVerify(false);
+    setCardAlert("");
+    setCardReference("");
+    setCardSuccess(
+      result?.data?.transaction?.status === "partially_paid" && typeof remaining === "number"
+        ? `บันทึกรับชำระด้วยบัตรแล้ว เลขอ้างอิง ${recordedReference} คงเหลือ ${formatCurrency(remaining)} บาท`
+        : `รับชำระด้วยบัตรสำเร็จ เลขอ้างอิง ${recordedReference}`
     );
+    suppressAutoQrRef.current = true;
+    void Promise.resolve(onSuccess());
+    setReloadKey((value) => value + 1);
+  }
 
-    const result = (await response.json().catch(() => null)) as AdminPaymentResponse | null;
+  // หลังเน็ตมีปัญหาหรือ 5xx ไม่รู้ว่าบันทึกแล้วหรือยัง ให้โหลดรายการแล้วหา reference นี้ก่อน ห้ามส่งซ้ำ
+  async function verifyCardPayment(reference: string) {
+    if (!detail) return;
+    try {
+      setSubmitting(true);
+      const json = await getTransactionByPlate(detail.plateNo);
 
-    if (!response.ok) {
-      throw new Error(result?.message || "ไม่สามารถยืนยันการชำระเงินได้");
+      const recorded = json.payments.some(
+        (payment) =>
+          payment.reference === reference &&
+          (!payment.edcDeviceId || payment.edcDeviceId === edcDeviceId)
+      );
+      if (recorded) {
+        finishCardSuccess(reference, null);
+        return;
+      }
+
+      setCardNeedsVerify(false);
+      setCardAlert("");
+      setError(`ยังไม่พบการบันทึกบัตรเลขอ้างอิง ${reference} ในระบบ กดยืนยันอีกครั้งเพื่อบันทึกได้`);
+    } catch {
+      setError("ตรวจสอบรายการไม่ได้ กรุณาตรวจสอบเครือข่ายแล้วกด \"ตรวจสอบการบันทึก\" อีกครั้ง (ห้ามรูดบัตรซ้ำ)");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleConfirmCardPayment() {
+    if (!detail || submittingRef.current) return;
+
+    const reference = cardReference.trim();
+    if (cardNeedsVerify) {
+      await verifyCardPayment(reference);
+      return;
     }
 
-    return result;
+    // ต้องเท่ากับยอดที่รูด ตรวจแค่รูปแบบตัวเลข ที่เหลือ backend ตรวจ
+    const amount = parseMoneyInput(cardAmountInput);
+    if (Number.isNaN(amount)) {
+      setCardFieldError("กรุณากรอกยอดที่รูดบัตรให้ถูกต้อง (ทศนิยมไม่เกิน 2 ตำแหน่ง)");
+      return;
+    }
+
+    const confirmPendingCharge = confirmPendingChargeRef.current;
+    confirmPendingChargeRef.current = false;
+    submittingRef.current = true;
+    setSubmitting(true);
+    setError("");
+    setCardFieldError("");
+    setCardAlert("");
+    setCardSuccess("");
+
+    try {
+      const payload: AdminPaymentRequest = {
+        method: CARD_METHOD_ID,
+        channel: ADMIN_CHANNEL_CODE,
+        amount,
+        reference,
+        // backend เติม TID จากเครื่องที่ลงทะเบียนนี้
+        edcDeviceId,
+        ...(confirmPendingCharge ? { confirmPendingCharge: true } : {}),
+      };
+
+      let result: AdminPaymentResponse;
+      try {
+        result = await payTransaction(detail.plateNo, payload);
+      } catch (err) {
+        // ไม่มีคำตอบหรือ 5xx ไม่รู้ว่าบันทึกแล้วหรือยัง ให้ตรวจก่อน
+        if (!(err instanceof ApiError) || err.status >= 500) {
+          setCardNeedsVerify(true);
+          if (!(err instanceof ApiError)) {
+            setError("ไม่ได้รับผลตอบกลับจากระบบ ห้ามกดบันทึกซ้ำทันที กำลังตรวจสอบรายการ...");
+          }
+          submittingRef.current = false;
+          await verifyCardPayment(reference);
+          return;
+        }
+        throw err;
+      }
+
+      finishCardSuccess(reference, result);
+    } catch (err) {
+      // 409 มี QR รอจ่ายอยู่ ให้ถามก่อนแล้วส่งใหม่พร้อม confirmPendingCharge
+      if (isApiErrorCode(err, "PENDING_GATEWAY_CHARGE")) {
+        setPendingChargeDialog({ ...readPendingGatewayCharge(err), next: "resubmit_card" });
+        return;
+      }
+
+      // เลขอ้างอิงบน slip ผิดหรือซ้ำ แก้แล้วส่งใหม่ได้ (รูดใหม่จะได้เลขใหม่)
+      if (
+        err instanceof ApiError &&
+        (err.code === "PAYMENT_REFERENCE_USED" ||
+          err.code === "PAYMENT_REFERENCE_REQUIRED" ||
+          err.code === "VALIDATION_ERROR")
+      ) {
+        const fields = getFieldErrors(err);
+        setCardFieldError(fields.reference ?? fields.edcDeviceId ?? err.message);
+        return;
+      }
+
+      // เครื่อง EDC ที่เลือกใช้ไม่ได้ ให้โหลดรายการใหม่และเลือกเครื่องที่รูดจริง
+      if (err instanceof ApiError && err.code && EDC_SELECTION_ERRORS.has(err.code)) {
+        setCardFieldError(
+          `${err.message} ถ้ารูดบัตรไปแล้ว ให้เลือกเครื่องที่ใช้รูดจริงแล้วยืนยันอีกครั้ง หากเครื่องนั้นถูกปิดใช้งาน กรุณายกเลิกรายการ (void) ที่เครื่อง EDC`
+        );
+        void loadEdcTerminals();
+        return;
+      }
+
+      // ถูกปฏิเสธหลังเครื่อง EDC อนุมัติแล้ว เงินไม่ผ่าน Omise จึงคืนอัตโนมัติไม่ได้ ต้อง void
+      const reason = getErrorMessage(err, "บันทึกการรับชำระด้วยบัตรไม่สำเร็จ");
+      setCardAlert(
+        `ระบบไม่ได้บันทึกยอดนี้ (${reason}) กรุณายกเลิกรายการ (void) ที่เครื่อง EDC เลขอ้างอิง ${reference}`
+      );
+      suppressAutoQrRef.current = true;
+      void Promise.resolve(onSuccess());
+      setReloadKey((value) => value + 1);
+      if (err instanceof ApiError && err.code === "PAYMENT_SELECTION_INVALID") {
+        void handlePaymentSelectionInvalid(err.message);
+      }
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
+    }
   }
 
   async function handleConfirmPayment() {
     if (!detail) return;
+    // กันกดซ้ำเร็ว ๆ แล้วส่ง 2 ครั้ง
+    if (submittingRef.current) return;
+    submittingRef.current = true;
 
     try {
       setSubmitting(true);
@@ -929,19 +1167,74 @@ function PaymentModal({
         throw new Error(qrError || "รอตรวจสอบการชำระเงินจาก Omise");
       }
 
-      if (mode === "cash" && receivedAmount < detail.remainingAmount) {
+      const amountError = validatePayAmount();
+      setPayAmountError(amountError);
+      if (amountError) return;
+
+      if (mode === "cash" && receivedAmount < payAmount) {
         throw new Error("จำนวนเงินรับน้อยกว่ายอดชำระ");
       }
 
-      await submitAdminPayment("cash");
+      // การยืนยันหนึ่งครั้งใช้กับการส่งครั้งเดียว
+      const confirmPendingCharge = confirmPendingChargeRef.current;
+      confirmPendingChargeRef.current = false;
+
+      const result = await submitAdminPayment(CASH_METHOD_ID, confirmPendingCharge);
+      const nextStatus = result?.data?.transaction?.status;
 
       await onSuccess();
+
+      if (nextStatus === "partially_paid") {
+        // ยังมียอดค้าง อยู่หน้าเดิมและโหลดยอดใหม่
+        setNotice(
+          `บันทึกการชำระ ${formatCurrency(result?.data?.payment?.paidAmount ?? payAmount)} บาทแล้ว คงเหลือ ${formatCurrency(result?.data?.amount?.remainingAmount ?? 0)} บาท`
+        );
+        setReloadKey((value) => value + 1);
+        return;
+      }
+
       onClose();
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "ไม่สามารถยืนยันการชำระเงินได้"
-      );
+      if (err instanceof ApiError && err.code === "AMOUNT_EXCEEDS_REMAINING") {
+        const remaining = Number(err.detail("remainingAmount"));
+        if (Number.isFinite(remaining)) {
+          setDetail((prev) => (prev ? { ...prev, remainingAmount: remaining } : prev));
+          setPartialPayment(true);
+          setPayAmountInput(String(remaining));
+          setPayAmountError(
+            `${err.message} (ยอดคงเหลือ ${formatCurrency(remaining)} บาท เติมยอดให้แล้ว)`
+          );
+          return;
+        }
+      }
+
+      if (err instanceof ApiError && err.code === "PAYMENT_SELECTION_INVALID") {
+        await handlePaymentSelectionInvalid(err.message);
+        return;
+      }
+
+      // 409 ยังมี QR รอจ่าย ให้ถามแอดมิน ห้ามยืนยันเอง
+      if (isApiErrorCode(err, "PENDING_GATEWAY_CHARGE")) {
+        setPendingChargeDialog({ ...readPendingGatewayCharge(err), next: "resubmit_cash" });
+        return;
+      }
+
+      if (err instanceof ApiError && err.code === "NO_REMAINING_AMOUNT") {
+        setNotice("รายการนี้ชำระครบแล้ว");
+        suppressAutoQrRef.current = true;
+        void Promise.resolve(onSuccess());
+        setReloadKey((value) => value + 1);
+        return;
+      }
+
+      if (err instanceof ApiError && err.code === "INVALID_AMOUNT") {
+        setPayAmountError(err.message);
+        return;
+      }
+
+      setError(getErrorMessage(err, "ไม่สามารถยืนยันการชำระเงินได้"));
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   }
@@ -965,7 +1258,7 @@ function PaymentModal({
           <div className="py-20 text-center text-red-600">{error}</div>
         ) : detail ? (
           <div className="grid gap-5 lg:grid-cols-[260px_minmax(0,1fr)]">
-            <div className="flex min-h-[460px] flex-col bg-[#F5F6F7] px-6 py-7 sm:px-8 lg:h-[560px] lg:min-h-0 lg:px-8 lg:py-8">
+            <div className="flex min-h-[460px] flex-col bg-[#F5F6F7] px-6 py-7 sm:px-8 lg:h-[560px] lg:min-h-0 lg:overflow-y-auto lg:px-8 lg:py-8">
               <h2 className="text-[22px] font-extrabold leading-tight text-[#101C2B]">
                 ทำรายการชำระเงิน
               </h2>
@@ -988,6 +1281,13 @@ function PaymentModal({
                     {detail.durationDisplay}
                   </span>
                 </div>
+
+                {detail.feeBreakdown ? (
+                  <FeeBreakdownList
+                    breakdown={detail.feeBreakdown}
+                    billableHours={detail.billableHours}
+                  />
+                ) : null}
 
                 <div className="space-y-2 border-b border-[#E3E7EB] pb-4 text-[14px]">
                   <div className="flex items-center justify-between text-[#66707D]">
@@ -1041,11 +1341,29 @@ function PaymentModal({
             </div>
 
             <div className="lg:h-[560px] lg:pr-6">
-              <div className="grid gap-4 md:grid-cols-2">
+              {scanAlert ? (
+                <div
+                  role="alert"
+                  className={`mb-4 rounded-2xl border px-5 py-4 text-[14px] font-semibold ${scanAlert.tone === "danger"
+                    ? "border-red-300 bg-red-50 text-red-700"
+                    : "border-amber-300 bg-amber-50 text-amber-800"
+                    }`}
+                >
+                  <p>{scanAlert.message}</p>
+                  <p className="mt-1 text-[12px] font-medium">
+                    PromptPay คืนเงินผ่านระบบไม่ได้ กรุณาคืนเงินสดหรือโอนคืน แล้วบันทึกที่{" "}
+                    <Link href={REFUNDS_PATH} onClick={onClose} className="underline">
+                      รายการรอคืนเงิน
+                    </Link>
+                  </p>
+                </div>
+              ) : null}
+
+              <div className={`grid gap-4 ${availableMethods.length >= 3 ? "md:grid-cols-3" : "md:grid-cols-2"}`}>
+                {availableMethods.includes("qr") ? (
                 <button
                   type="button"
                   onClick={handleSelectQrMode}
-                  disabled={!availableMethods.includes("qr")}
                   className={`flex min-h-[86px] cursor-pointer flex-col items-center justify-center rounded-2xl border px-4 py-3 transition disabled:cursor-not-allowed ${mode === "qr"
                       ? "border-[#8CC2FF] bg-[#EEF5FD]"
                       : "border-transparent bg-[#EFF1F3]"
@@ -1055,14 +1373,15 @@ function PaymentModal({
                     <LuQrCode size={22} />
                   </div>
                   <span className="text-[14px] font-bold text-[#1F2933]">
-                    สแกนจ่าย
+                    {paymentOptions.scan.label ?? "สแกนจ่าย"}
                   </span>
                 </button>
+                ) : null}
 
+                {availableMethods.includes("cash") ? (
                 <button
                   type="button"
-                  onClick={() => setMode("cash")}
-                  disabled={!availableMethods.includes("cash")}
+                  onClick={handleSelectCashMode}
                   className={`flex min-h-[86px] cursor-pointer flex-col items-center justify-center rounded-2xl border px-4 py-3 transition disabled:cursor-not-allowed ${mode === "cash"
                       ? "border-[#8CC2FF] bg-[#EEF5FD]"
                       : "border-transparent bg-[#EFF1F3]"
@@ -1072,12 +1391,132 @@ function PaymentModal({
                     <LuBanknote size={22} />
                   </div>
                   <span className="text-[14px] font-bold text-[#1F2933]">
-                    เงินสด
+                    {paymentOptions.cash.label ?? "เงินสด"}
                   </span>
                 </button>
+                ) : null}
+
+                {availableMethods.includes("card") ? (
+                <button
+                  type="button"
+                  onClick={handleSelectCardMode}
+                  className={`flex min-h-[86px] cursor-pointer flex-col items-center justify-center rounded-2xl border px-4 py-3 transition disabled:cursor-not-allowed ${mode === "card"
+                      ? "border-[#8CC2FF] bg-[#EEF5FD]"
+                      : "border-transparent bg-[#EFF1F3]"
+                    }`}
+                >
+                  <div className="mb-2 flex h-12 w-28 items-center justify-center rounded-lg bg-white text-[#1D2A36]">
+                    <LuCreditCard size={22} />
+                  </div>
+                  <span className="text-[14px] font-bold text-[#1F2933]">
+                    บัตร (เครื่อง EDC)
+                  </span>
+                </button>
+                ) : null}
               </div>
 
-              {mode === "qr" ? (
+              {availableMethods.length === 0 ? (
+                <div className="mt-4 rounded-2xl bg-[#F3F5F7] px-6 py-10 text-center text-[14px] text-[#66707D]">
+                  ยังไม่มีวิธีชำระเงินที่เปิดใช้งานสำหรับแคชเชียร์
+                  <br />
+                  กรุณาตรวจสอบที่หน้าตั้งค่าช่องทางชำระเงิน
+                </div>
+              ) : mode === "card" ? (
+                <div className="mt-4 space-y-4">
+                  <ol className="list-decimal space-y-1 rounded-2xl bg-[#F3F5F7] px-8 py-4 text-[13px] leading-6 text-[#374151]">
+                    <li>ใส่ยอดที่เครื่อง EDC ให้ตรงกับ &quot;ยอดที่รูดบัตร&quot;</li>
+                    <li>ให้ลูกค้าแตะหรือเสียบบัตรที่เครื่อง แล้ว<strong>รอเครื่องอนุมัติ</strong></li>
+                    <li>กรอกเลขอ้างอิงจากสลิป EDC แล้วกดยืนยัน</li>
+                  </ol>
+
+                  <div>
+                    <label htmlFor="edc-device" className="mb-2 block text-[14px] font-semibold text-[#66707D]">
+                      เครื่อง EDC ที่ใช้รูด <span className="text-red-600">*</span>
+                    </label>
+                    <select
+                      id="edc-device"
+                      value={edcDeviceId}
+                      disabled={submitting || cardNeedsVerify}
+                      onChange={(event) => {
+                        setEdcDeviceId(event.target.value);
+                        storeEdcDeviceId(event.target.value);
+                        setCardFieldError("");
+                      }}
+                      className="h-12 w-full rounded-xl bg-[#F3F5F7] px-4 text-[15px] font-bold text-[#1F2933] outline-none disabled:opacity-60"
+                    >
+                      <option value="">เลือกเครื่อง EDC</option>
+                      {edcTerminals.map((terminal) => (
+                        <option key={terminal.deviceId} value={terminal.deviceId}>
+                          {terminal.deviceName} ({terminal.terminalId})
+                          {terminal.location ? ` - ${terminal.location}` : ""}
+                        </option>
+                      ))}
+                    </select>
+                    {edcTerminalsError ? (
+                      <p className="mt-1 text-[12px] text-red-600">{edcTerminalsError}</p>
+                    ) : (
+                      <p className="mt-1 text-[12px] text-[#8A95A3]">ระบบจะจำเครื่องที่เลือกไว้ในเครื่องคอมพิวเตอร์นี้</p>
+                    )}
+                  </div>
+
+                  <div>
+                    <label htmlFor="edc-amount" className="mb-2 block text-[14px] font-semibold text-[#66707D]">
+                      ยอดที่รูดบัตร (ไม่เกิน {formatCurrency(detail.remainingAmount)} ฿)
+                    </label>
+                    <div className="flex min-h-[56px] items-center rounded-2xl bg-[#F3F5F7] px-6">
+                      <input
+                        id="edc-amount"
+                        type="number"
+                        inputMode="decimal"
+                        min={0.01}
+                        max={detail.remainingAmount}
+                        step="0.01"
+                        value={cardAmountInput}
+                        disabled={submitting || cardNeedsVerify}
+                        onChange={(event) => {
+                          setCardAmountInput(event.target.value);
+                          setCardFieldError("");
+                        }}
+                        className="w-full bg-transparent text-right text-[24px] font-extrabold text-[#1F2933] outline-none disabled:opacity-60"
+                      />
+                      <span className="ml-3 text-[18px] font-bold text-[#94A3B8]">฿</span>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label htmlFor="edc-reference" className="mb-2 block text-[14px] font-semibold text-[#66707D]">
+                      เลขอ้างอิงจากสลิป EDC <span className="text-red-600">*</span>
+                    </label>
+                    <input
+                      id="edc-reference"
+                      value={cardReference}
+                      disabled={submitting || cardNeedsVerify}
+                      placeholder="approval code หรือเลขที่รายการ"
+                      onChange={(event) => {
+                        setCardReference(event.target.value);
+                        setCardFieldError("");
+                      }}
+                      aria-invalid={Boolean(cardFieldError)}
+                      className="h-14 w-full rounded-2xl bg-[#F3F5F7] px-6 text-[18px] font-bold text-[#1F2933] outline-none disabled:opacity-60"
+                    />
+                    {cardFieldError ? (
+                      <p className="mt-2 text-[13px] font-medium text-red-600">{cardFieldError}</p>
+                    ) : null}
+                  </div>
+
+                  {cardAlert ? (
+                    <div role="alert" className="rounded-2xl border border-red-300 bg-red-50 px-5 py-4 text-[14px] font-semibold text-red-700">
+                      {cardAlert}
+                    </div>
+                  ) : null}
+
+                  {cardSuccess ? (
+                    <div className="rounded-2xl border border-green-200 bg-green-50 px-5 py-4 text-[14px] font-semibold text-green-700">
+                      {cardSuccess}
+                    </div>
+                  ) : null}
+                </div>
+              ) : mode === "qr" ? (
                 <div className="mt-4 text-center">
                   <div className="mx-auto flex h-[270px] w-full items-center justify-center overflow-hidden rounded-2xl border border-[#CFE2FF] bg-[#EEF5FD] px-4 py-5">
                     {qrLoading ? (
@@ -1095,6 +1534,18 @@ function PaymentModal({
                           สร้าง QR ใหม่
                         </button>
                       </div>
+                    ) : qrExpired ? (
+                      <div>
+                        <div className="text-[16px] font-bold text-red-600">QR หมดอายุ</div>
+                        <button
+                          type="button"
+                          onClick={handleCreatePromptPayQr}
+                          disabled={detail.remainingAmount <= 0}
+                          className="mt-4 inline-flex min-h-12 cursor-pointer items-center justify-center rounded-full bg-[#061D36] px-6 text-[15px] font-bold text-white transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          สร้าง QR ใหม่
+                        </button>
+                      </div>
                     ) : qrImageObjectUrl ? (
                       <div className="flex w-full flex-col items-center">
                         <img
@@ -1102,9 +1553,19 @@ function PaymentModal({
                           alt="Omise PromptPay QR Code"
                           className="h-auto max-h-[178px] w-full max-w-[260px] object-contain lg:max-w-xs"
                         />
-                        <p className="mt-4 text-[15px] text-[#374151]">
+                        <p className="mt-3 text-[15px] text-[#374151]">
                           สแกน QR Code เพื่อชำระเงิน
+                          {qrMsLeft !== null ? (
+                            <span className="ml-2 font-bold text-[#061D36]">
+                              หมดอายุใน {formatCountdown(qrMsLeft)}
+                            </span>
+                          ) : null}
                         </p>
+                        {omiseCharge?.reused ? (
+                          <p className="mt-1 text-[12px] text-[#64748B]">
+                            แสดง QR เดิมที่ยังรอชำระ
+                          </p>
+                        ) : null}
                         {paymentVerifyError ? (
                           <p className="mt-2 text-[13px] text-[#D97706]">
                             {paymentVerifyError}
@@ -1122,9 +1583,52 @@ function PaymentModal({
                       </button>
                     )}
                   </div>
+
                 </div>
               ) : (
                 <div className="mt-4">
+                  <label className="mb-3 inline-flex cursor-pointer items-center gap-2 text-[14px] font-semibold text-[#1F2933]">
+                    <input
+                      type="checkbox"
+                      checked={partialPayment}
+                      onChange={handleTogglePartialPayment}
+                      className="h-4 w-4 rounded border-[#CBD5E1]"
+                    />
+                    ชำระบางส่วน
+                  </label>
+
+                  {partialPayment ? (
+                    <div className="mb-4">
+                      <label
+                        htmlFor="partial-pay-amount"
+                        className="mb-2 block text-[14px] font-semibold text-[#66707D]"
+                      >
+                        ยอดที่ชำระครั้งนี้ (ไม่เกิน {formatCurrency(detail.remainingAmount)} ฿)
+                      </label>
+                      <div className="flex min-h-[56px] items-center rounded-2xl bg-[#F3F5F7] px-6">
+                        <input
+                          id="partial-pay-amount"
+                          type="number"
+                          inputMode="decimal"
+                          min={0.01}
+                          max={detail.remainingAmount}
+                          step="0.01"
+                          value={payAmountInput}
+                          onChange={(event) => {
+                            setPayAmountInput(event.target.value);
+                            setPayAmountError("");
+                          }}
+                          aria-invalid={Boolean(payAmountError)}
+                          className="w-full cursor-text bg-transparent text-right text-[24px] font-extrabold text-[#1F2933] outline-none"
+                        />
+                        <span className="ml-3 text-[18px] font-bold text-[#94A3B8]">฿</span>
+                      </div>
+                      {payAmountError ? (
+                        <p className="mt-2 text-[13px] font-medium text-red-600">{payAmountError}</p>
+                      ) : null}
+                    </div>
+                  ) : null}
+
                   <label className="mb-2 block text-[14px] font-semibold text-[#66707D]">
                     จำนวนเงินที่ได้รับ
                   </label>
@@ -1162,10 +1666,24 @@ function PaymentModal({
                 <p className="mt-4 text-sm font-medium text-red-600">{error}</p>
               ) : null}
 
+              {notice && !error ? (
+                <p className="mt-4 text-sm font-medium text-[#16A34A]">{notice}</p>
+              ) : null}
+
               <button
                 type="button"
-                onClick={handleConfirmPayment}
-                disabled={submitting || detail.remainingAmount <= 0 || mode === "qr"}
+                onClick={() =>
+                  void (mode === "card" ? handleConfirmCardPayment() : handleConfirmPayment())
+                }
+                disabled={
+                  submitting ||
+                  mode === "qr" ||
+                  !availableMethods.includes(mode) ||
+                  (mode === "card"
+                    ? !cardNeedsVerify &&
+                      (detail.remainingAmount <= 0 || !cardReference.trim() || !edcDeviceId)
+                    : detail.remainingAmount <= 0)
+                }
                 className="mt-5 inline-flex min-h-[58px] w-full cursor-pointer items-center justify-center rounded-[18px] bg-[#061D36] px-5 text-[17px] font-bold text-white shadow-[0_12px_30px_rgba(6,29,54,0.18)] transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-60 sm:text-[20px]"
               >
                 {mode === "qr"
@@ -1174,7 +1692,11 @@ function PaymentModal({
                     : "รอตรวจสอบการชำระเงิน"
                   : submitting
                     ? "กำลังบันทึก..."
-                    : "ยืนยันการชำระเงิน"}
+                    : mode === "card"
+                      ? cardNeedsVerify
+                        ? "ตรวจสอบการบันทึก"
+                        : "ยืนยันรับชำระด้วยบัตร"
+                      : "ยืนยันการชำระเงิน"}
               </button>
 
               <button
@@ -1187,9 +1709,56 @@ function PaymentModal({
             </div>
           </div>
         ) : null}
+
+        {pendingChargeDialog ? (
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-[#2E3445]/70 p-4">
+            <div
+              role="alertdialog"
+              aria-modal="true"
+              className="w-full max-w-[460px] rounded-[24px] bg-white p-6 shadow-2xl"
+            >
+              <h3 className="text-[20px] font-extrabold text-[#101C2B]">มี QR รอชำระอยู่</h3>
+              <p className="mt-3 text-[14px] leading-6 text-[#374151]">
+                รายการนี้มี QR รอชำระอยู่
+                {(() => {
+                  const minutes = getMinutesLeft(pendingChargeDialog.expiresAt);
+                  return minutes ? ` (หมดอายุใน ${minutes} นาที)` : "";
+                })()}
+                {pendingChargeDialog.amount > 0
+                  ? ` ยอด ${formatCurrency(satangToBaht(pendingChargeDialog.amount))} บาท`
+                  : ""}
+              </p>
+              <p className="mt-2 text-[14px] leading-6 text-[#B45309]">
+                {pendingChargeDialog.next.endsWith("_card")
+                  ? "ถ้ารับชำระด้วยบัตรตอนนี้ และลูกค้าสแกน QR จ่ายซ้ำ เงินส่วนนั้นต้องคืนลูกค้าเอง"
+                  : "ถ้ารับเงินสดตอนนี้ และลูกค้าสแกน QR จ่ายซ้ำ เงินส่วนนั้นต้องคืนลูกค้าเอง"}
+              </p>
+              <p className="mt-2 text-[14px] font-semibold text-[#101C2B]">
+                กรุณาแจ้งลูกค้าว่าไม่ต้องสแกน QR แล้ว
+              </p>
+
+              <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+                <button
+                  type="button"
+                  onClick={handleCancelCashWithPendingCharge}
+                  className="h-11 min-w-[110px] rounded-full bg-[#9CA3AF] px-6 text-[14px] font-bold text-white"
+                >
+                  ยกเลิก
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmCashWithPendingCharge}
+                  className="h-11 min-w-[110px] rounded-full bg-[#061D36] px-6 text-[14px] font-bold text-white"
+                >
+                  {pendingChargeDialog.next.endsWith("_card") ? "รับชำระด้วยบัตร" : "รับเงินสด"}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
       </div>
     </div>
   );
 }
 
-export default PaymentModal;
+export { PaymentModal };

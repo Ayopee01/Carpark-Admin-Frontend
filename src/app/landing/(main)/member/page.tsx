@@ -1,37 +1,25 @@
 "use client";
+// Import Library
+import { useEffect, useMemo, useState, type JSX } from "react";
+import { LuCheck, LuCreditCard, LuLayoutDashboard, LuPalette, LuPencil, LuPlus, LuReceipt, LuSearch, LuSettings, LuSlidersHorizontal, LuTrash2, LuX } from "react-icons/lu";
+// Import Components
+import { AddMemberModal } from "@/src/app/components/member/AddMemberModal";
+import { PermissionModal } from "@/src/app/components/member/PermissionModal";
+import { LoadingScreen } from "@/src/app/components/shared/LoadingScreen";
+// Import Api
+import { createMember, deleteMember, getMembers, updateMember, updateMemberPermissions } from "@/src/app/lib/api/members";
+// Import Auth
+import { useCurrentUser } from "@/src/app/lib/auth/permissions";
+// Import Types
+import type { CreateMemberPayload, MemberStats, PermissionItem } from "@/src/app/type/ui/member";
+import type { Permission } from "@/src/app/type/api/auth";
+import type { Member, MemberBody } from "@/src/app/type/api/members";
+// Import Shared
+import { getFieldErrors } from "@/src/app/lib/shared/http";
 
-import { useEffect, useMemo, useState } from "react";
-// Icons
-import {
-  LuCheck,
-  LuCreditCard,
-  LuLayoutDashboard,
-  LuPalette,
-  LuPencil,
-  LuPlus,
-  LuReceipt,
-  LuSearch,
-  LuSettings,
-  LuSlidersHorizontal,
-  LuTrash2,
-  LuX,
-} from "react-icons/lu";
-// Components
-import AddMemberModal from "@/src/app/components/member/AddMemberModal";
-import PermissionModal, {
-  type PermissionItem,
-} from "@/src/app/components/member/PermissionModal";
-import Preload from "@/src/app/components/Preload";
-// Types
-import type {
-  CreateMemberPayload,
-  Member,
-  MemberRole,
-  MemberStats,
-  MemberStatus,
-} from "@/src/app/type/member/member";
-import type { Permission } from "@/src/app/type/common";
+/* -------------------------------------- Config -------------------------------------- */
 
+// Config permission ที่เลือกได้พร้อมชื่อและไอคอน
 const PERMISSIONS: PermissionItem[] = [
   {
     key: "dashboard",
@@ -70,8 +58,10 @@ const PERMISSIONS: PermissionItem[] = [
   },
 ];
 
+// Config key ของ permission ที่หน้านี้รู้จัก
 const PERMISSION_KEYS = new Set(PERMISSIONS.map((permission) => permission.key));
 
+// Config ตัวเลือก role
 const ROLE_OPTIONS = [
   { value: "super_admin", label: "ผู้ดูแลระบบ" },
   { value: "admin", label: "แอดมิน" },
@@ -79,6 +69,7 @@ const ROLE_OPTIONS = [
   { value: "staff", label: "แคชเชียร์" },
 ];
 
+// Config ลำดับของ role ใช้เรียงรายการ
 const ROLE_RANK: Record<string, number> = {
   super_admin: 4,
   admin: 3,
@@ -86,13 +77,17 @@ const ROLE_RANK: Record<string, number> = {
   staff: 1,
 };
 
-function getRoleRank(role?: string) {
+/* -------------------------------------- Helpers -------------------------------------- */
+
+// Function ดึงลำดับของ role (ไม่รู้จัก = ท้ายสุด)
+function getRoleRank(role?: string): number {
   if (!role) return 0;
 
   return ROLE_RANK[role] ?? 0;
 }
 
-function splitFullName(fullName: string) {
+// Function แยกชื่อเต็มเป็นชื่อและนามสกุล
+function splitFullName(fullName: string): { firstName: string; lastName: string } {
   const names = fullName.trim().split(/\s+/).filter(Boolean);
   const firstName = names.shift() ?? "";
   const lastName = names.join(" ");
@@ -100,12 +95,14 @@ function splitFullName(fullName: string) {
   return { firstName, lastName };
 }
 
-function getMemberFullName(member: Partial<Member>) {
+// Function รวมชื่อและนามสกุลของสมาชิก
+function getMemberFullName(member: Partial<Member>): string {
   const firstName = member.firstName?.trim() ?? "";
   const lastName = member.lastName?.trim() ?? "";
   return `${firstName} ${lastName}`.trim();
 }
 
+// Function กรองเฉพาะ permission ที่รู้จัก
 function normalizePermissions(permissions?: string[]): Permission[] {
   const selectedKeys = new Set(permissions ?? []);
 
@@ -114,28 +111,18 @@ function normalizePermissions(permissions?: string[]): Permission[] {
   ).map((permission) => permission.key as Permission);
 }
 
-function getToken() {
-  return typeof window !== "undefined" ? localStorage.getItem("token") : null;
+// Function ข้อความสำหรับ screen reader เมื่อปุ่มสถานะกดไม่ได้
+function StatusToggleDisabledHint({ reason }: { reason: string }): JSX.Element {
+  return <span className="sr-only">{reason}</span>;
 }
 
-function getErrorMessage(value: unknown, fallback: string) {
-  if (
-    value &&
-    typeof value === "object" &&
-    "message" in value &&
-    typeof value.message === "string"
-  ) {
-    return value.message;
-  }
-
-  return fallback;
-}
-
-function formatRole(role: MemberRole) {
+// Function ดึงชื่อที่แสดงของ role
+function formatRole(role: Member["role"]): string {
   return ROLE_OPTIONS.find((item) => item.value === role)?.label ?? role;
 }
 
-function formatThaiDateTime(date: Date) {
+// Function แปลงวันเวลาเป็นข้อความไทย
+function formatThaiDateTime(date: Date): string {
   return new Intl.DateTimeFormat("th-TH-u-ca-buddhist", {
     day: "2-digit",
     month: "short",
@@ -150,7 +137,8 @@ function formatThaiDateTime(date: Date) {
     .replace(",", "");
 }
 
-function StatCard({ title, value }: { title: string; value: number | string }) {
+// Function การ์ดตัวเลขสถิติสมาชิก
+function StatCard({ title, value }: { title: string; value: number | string }): JSX.Element {
   return (
     <article className="relative min-h-36 rounded-lg bg-gray-200 px-8 pb-5 pt-7">
       <div className="absolute inset-x-0 top-0 h-1 rounded-t-lg bg-gray-800" />
@@ -164,20 +152,28 @@ function StatCard({ title, value }: { title: string; value: number | string }) {
   );
 }
 
+// Function ปุ่มเปิด/ปิดสถานะสมาชิก
 function StatusToggle({
   checked,
   onClick,
+  disabled = false,
+  title,
 }: {
   checked: boolean;
   onClick: () => void;
-}) {
+  disabled?: boolean;
+  title?: string;
+}): JSX.Element {
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`relative h-6 w-12 rounded-full transition ${checked ? "bg-green-500" : "bg-gray-300"
+      disabled={disabled}
+      title={title}
+      className={`relative h-6 w-12 rounded-full transition disabled:cursor-not-allowed disabled:opacity-50 ${checked ? "bg-green-500" : "bg-gray-300"
         }`}
     >
+      {title && disabled ? <StatusToggleDisabledHint reason={title} /> : null}
       <span
         className={`absolute top-1/2 h-5 w-5 -translate-y-1/2 rounded-full bg-white transition ${checked ? "right-0.5" : "left-0.5"
           }`}
@@ -186,7 +182,10 @@ function StatusToggle({
   );
 }
 
-function MemberPage() {
+/* -------------------------------------- Component -------------------------------------- */
+
+// Function หน้าจัดการสมาชิก เพิ่ม แก้ไข ลบ และกำหนด permission
+function MemberPage(): JSX.Element {
   const [members, setMembers] = useState<Member[]>([]);
   const [stats, setStats] = useState<MemberStats>({
     totalMembers: 0,
@@ -200,6 +199,8 @@ function MemberPage() {
   const [error, setError] = useState("");
 
   const [openAdd, setOpenAdd] = useState(false);
+  const [addError, setAddError] = useState("");
+  const [addFieldErrors, setAddFieldErrors] = useState<Record<string, string>>({});
   const [openPermission, setOpenPermission] = useState(false);
   const [selectedMember, setSelectedMember] = useState<Member | null>(null);
 
@@ -221,6 +222,13 @@ function MemberPage() {
   const [permissionDraft, setPermissionDraft] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
 
+  // ให้สิทธิ์ได้เฉพาะที่ตัวเองมี ส่วนกฎของบัญชี (ตัวเอง, super_admin คนสุดท้าย) backend ตรวจ
+  const currentUser = useCurrentUser();
+  const grantablePermissions = useMemo(
+    () => new Set<string>(currentUser?.permissions ?? []),
+    [currentUser]
+  );
+
   useEffect(() => {
     function updateDateTime() {
       setCurrentDateTime(formatThaiDateTime(new Date()));
@@ -241,47 +249,19 @@ function MemberPage() {
       setProgress(8);
       setError("");
 
-      const token = getToken();
-
       setProgress(18);
 
-      const [statsResponse, membersResponse] = await Promise.all([
-        fetch("/api/members/stats", {
-          headers: {
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
-          cache: "no-store",
-        }),
-        fetch("/api/members", {
-          headers: {
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
-          cache: "no-store",
-        }),
-      ]);
-
-      setProgress(55);
-
-      const statsJson = await statsResponse.json().catch(() => null);
-
-      setProgress(70);
-
-      const membersJson = await membersResponse.json().catch(() => null);
+      // เรียกครั้งเดียว ตารางอยู่ใน data การ์ดสถิติอยู่ใน meta
+      const { data, meta } = await getMembers();
 
       setProgress(82);
 
-      if (!statsResponse.ok) {
-        throw new Error(getErrorMessage(statsJson, "โหลดสถิติสมาชิกไม่สำเร็จ"));
-      }
-
-      if (!membersResponse.ok) {
-        throw new Error(
-          getErrorMessage(membersJson, "โหลดรายการสมาชิกไม่สำเร็จ")
-        );
-      }
-
-      setStats(statsJson as MemberStats);
-      setMembers(Array.isArray(membersJson) ? membersJson : []);
+      setStats({
+        totalMembers: meta.totalMembers,
+        activeMembers: meta.activeMembers,
+        totalAdmins: meta.totalAdmins,
+      });
+      setMembers(data);
       setProgress(100);
     } catch (err) {
       setError(err instanceof Error ? err.message : "เกิดข้อผิดพลาด");
@@ -348,29 +328,14 @@ function MemberPage() {
       setSubmitting(true);
       setError("");
 
-      const token = getToken();
-
-      const response = await fetch(`/api/members/${memberId}`, {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({
-          firstName: String(editDraft.firstName ?? "").trim(),
-          lastName: String(editDraft.lastName ?? "").trim(),
-          email: String(editDraft.email ?? "").trim(),
-          phone: String(editDraft.phone ?? "").trim(),
-          role: editDraft.role,
-          status: editDraft.status,
-        }),
+      await updateMember(memberId, {
+        firstName: String(editDraft.firstName ?? "").trim(),
+        lastName: String(editDraft.lastName ?? "").trim(),
+        email: String(editDraft.email ?? "").trim() || null,
+        phone: String(editDraft.phone ?? "").trim(),
+        role: editDraft.role,
+        status: editDraft.status,
       });
-
-      const result = await response.json().catch(() => null);
-
-      if (!response.ok) {
-        throw new Error(getErrorMessage(result, "แก้ไขสมาชิกไม่สำเร็จ"));
-      }
 
       handleCancelEdit();
       await fetchMembers();
@@ -382,28 +347,11 @@ function MemberPage() {
   }
 
   async function handleToggleStatus(member: Member) {
-    const nextStatus: MemberStatus =
+    const nextStatus: Member["status"] =
       member.status === "active" ? "inactive" : "active";
 
     try {
-      const token = getToken();
-
-      const response = await fetch(`/api/members/${member.id}`, {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({
-          status: nextStatus,
-        }),
-      });
-
-      const result = await response.json().catch(() => null);
-
-      if (!response.ok) {
-        throw new Error(getErrorMessage(result, "เปลี่ยนสถานะไม่สำเร็จ"));
-      }
+      await updateMember(member.id, { status: nextStatus });
 
       await fetchMembers();
     } catch (err) {
@@ -417,20 +365,7 @@ function MemberPage() {
     if (!confirmDelete) return;
 
     try {
-      const token = getToken();
-
-      const response = await fetch(`/api/members/${memberId}`, {
-        method: "DELETE",
-        headers: {
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-      });
-
-      const result = await response.json().catch(() => null);
-
-      if (!response.ok) {
-        throw new Error(getErrorMessage(result, "ลบสมาชิกไม่สำเร็จ"));
-      }
+      await deleteMember(memberId);
 
       await fetchMembers();
     } catch (err) {
@@ -438,32 +373,28 @@ function MemberPage() {
     }
   }
 
+  function handleOpenAdd() {
+    setAddError("");
+    setAddFieldErrors({});
+    setOpenAdd(true);
+  }
+
   async function handleCreateMember() {
     try {
       setSubmitting(true);
       setError("");
+      setAddError("");
+      setAddFieldErrors({});
 
-      const token = getToken();
-
-      const payload: CreateMemberPayload = {
+      const payload: MemberBody = {
         ...form,
-        permissions: normalizePermissions(form.permissions),
+        email: form.email.trim() || null,
+        permissions: normalizePermissions(form.permissions).filter((key) =>
+          grantablePermissions.has(key)
+        ),
       };
 
-      const response = await fetch("/api/members", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify(payload),
-      });
-
-      const result = await response.json().catch(() => null);
-
-      if (!response.ok) {
-        throw new Error(getErrorMessage(result, "เพิ่มสมาชิกไม่สำเร็จ"));
-      }
+      await createMember(payload);
 
       setOpenAdd(false);
       setForm({
@@ -478,7 +409,9 @@ function MemberPage() {
 
       await fetchMembers();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "เกิดข้อผิดพลาด");
+      // แสดงใน dialog ส่วน VALIDATION_ERROR แสดงใต้แต่ละช่อง
+      setAddFieldErrors(getFieldErrors(err));
+      setAddError(err instanceof Error ? err.message : "เกิดข้อผิดพลาด");
     } finally {
       setSubmitting(false);
     }
@@ -491,7 +424,7 @@ function MemberPage() {
   }
 
   function handleTogglePermission(key: string) {
-    if (!PERMISSION_KEYS.has(key)) return;
+    if (!PERMISSION_KEYS.has(key) || !grantablePermissions.has(key)) return;
 
     setPermissionDraft((prev) => {
       const nextPermissions = new Set(prev);
@@ -521,29 +454,8 @@ function MemberPage() {
       setSubmitting(true);
       setError("");
 
-      const token = getToken();
-
-      const payload = {
-        permissions: normalizePermissions(permissionDraft),
-      };
-
-      const response = await fetch(
-        `/api/members/${selectedMember.id}/permissions`,
-        {
-          method: "PATCH",
-          headers: {
-            "Content-Type": "application/json",
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
-          body: JSON.stringify(payload),
-        }
-      );
-
-      const result = await response.json().catch(() => null);
-
-      if (!response.ok) {
-        throw new Error(getErrorMessage(result, "ตั้งค่าสิทธิ์ไม่สำเร็จ"));
-      }
+      // PATCH /members/:id ด้วย permissions ได้ Member ที่แก้แล้วกลับมา
+      await updateMemberPermissions(selectedMember.id, normalizePermissions(permissionDraft));
 
       handleClosePermission();
       await fetchMembers();
@@ -556,7 +468,7 @@ function MemberPage() {
 
   if (loading) {
     return (
-      <Preload
+      <LoadingScreen
         open
         progress={progress}
         message="กำลังโหลดข้อมูล..."
@@ -604,7 +516,7 @@ function MemberPage() {
 
               <button
                 type="button"
-                onClick={() => setOpenAdd(true)}
+                onClick={handleOpenAdd}
                 className="inline-flex h-12 items-center gap-3 rounded-full bg-slate-900 px-7 text-sm font-bold text-white transition hover:opacity-90"
               >
                 <LuPlus size={17} />
@@ -651,7 +563,7 @@ function MemberPage() {
                 ) : (
                   filteredMembers.map((member) => {
                     const isEditing = editingId === member.id;
-
+                
                     return (
                       <tr key={member.id} className="border-b border-gray-100">
                         <td className="px-10 py-8">
@@ -729,10 +641,10 @@ function MemberPage() {
                               onChange={(event) =>
                                 setEditDraft((prev) => ({
                                   ...prev,
-                                  role: event.target.value as MemberRole,
+                                  role: event.target.value as Member["role"],
                                 }))
                               }
-                              className="h-9 rounded-md border border-gray-800 bg-white px-3 text-sm outline-none"
+                              className="h-9 rounded-md border border-gray-800 bg-white px-3 text-sm outline-none disabled:cursor-not-allowed disabled:opacity-60"
                             >
                               {ROLE_OPTIONS.map((role) => (
                                 <option key={role.value} value={role.value}>
@@ -759,7 +671,7 @@ function MemberPage() {
                             <button
                               type="button"
                               onClick={() => handleOpenPermission(member)}
-                              className="inline-flex h-9 items-center gap-2 rounded-md border border-gray-200 bg-white px-4 text-sm font-bold transition hover:bg-gray-50"
+                              className="inline-flex h-9 items-center gap-2 rounded-md border border-gray-200 bg-white px-4 text-sm font-bold transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
                             >
                               <LuSettings size={15} />
                               ตั้งค่าสิทธิ์
@@ -790,7 +702,8 @@ function MemberPage() {
                                 <button
                                   type="button"
                                   onClick={() => handleStartEdit(member)}
-                                  className="text-slate-900"
+                                  title="แก้ไข"
+                                  className="text-slate-900 disabled:cursor-not-allowed disabled:opacity-40"
                                 >
                                   <LuPencil size={22} />
                                 </button>
@@ -798,7 +711,8 @@ function MemberPage() {
                                 <button
                                   type="button"
                                   onClick={() => handleDelete(member.id)}
-                                  className="text-red-500"
+                                  title="ลบ"
+                                  className="text-red-500 disabled:cursor-not-allowed disabled:opacity-40"
                                 >
                                   <LuTrash2 size={22} />
                                 </button>
@@ -819,6 +733,8 @@ function MemberPage() {
       <AddMemberModal
         open={openAdd}
         form={form}
+        error={addError}
+        fieldErrors={addFieldErrors}
         submitting={submitting}
         onClose={() => setOpenAdd(false)}
         onChange={setForm}
@@ -828,6 +744,7 @@ function MemberPage() {
       <PermissionModal
         open={openPermission}
         permissions={PERMISSIONS}
+        isGrantable={(key) => grantablePermissions.has(key)}
         selectedPermissions={permissionDraft}
         submitting={submitting}
         onClose={handleClosePermission}

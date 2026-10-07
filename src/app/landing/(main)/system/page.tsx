@@ -1,15 +1,19 @@
 "use client";
+// Import Library
+import { useEffect, useMemo, useState, type JSX } from "react";
+// Import Components
+import { LoadingScreen } from "@/src/app/components/shared/LoadingScreen";
+import { SystemTabs } from "@/src/app/components/system/SystemTabs";
+import { GeneralTab } from "@/src/app/components/system/GeneralTab";
+import { EntryBillTab } from "@/src/app/components/system/EntryBillTab";
+import { PaidBillTab } from "@/src/app/components/system/PaidBillTab";
+// Import Types
+import type { SystemMenuKey } from "@/src/app/type/ui/navigation";
 
-import { useEffect, useMemo, useState } from "react";
-import Preload from "@/src/app/components/Preload";
-import SystemMenuTabs, {
-  type SystemMenuKey,
-} from "@/src/app/components/system/SystemMenuTabs";
-import SystemDeviceConfigContent from "@/src/app/components/system/SetupBill/SetupBillContent";
-import SystemEntryBillContent from "@/src/app/components/system/EntryBill/EntryBillContent";
-import SystemPaidBillContent from "@/src/app/components/system/PaidBill/PaidBillContent";
+/* -------------------------------------- Helpers -------------------------------------- */
 
-function formatThaiDateTime(date: Date) {
+// Function แปลงวันเวลาเป็นข้อความไทย
+function formatThaiDateTime(date: Date): string {
   return new Intl.DateTimeFormat("th-TH-u-ca-buddhist", {
     day: "2-digit",
     month: "short",
@@ -24,7 +28,8 @@ function formatThaiDateTime(date: Date) {
     .replace(",", "");
 }
 
-function getLoadingDetail(activeTab: SystemMenuKey) {
+// Function ข้อความระหว่างโหลดของแต่ละแท็บ
+function getLoadingDetail(activeTab: SystemMenuKey): string {
   switch (activeTab) {
     case "device":
       return "กำลังโหลดการตั้งค่าระบบ";
@@ -37,7 +42,10 @@ function getLoadingDetail(activeTab: SystemMenuKey) {
   }
 }
 
-function SettingSystemPage() {
+/* -------------------------------------- Component -------------------------------------- */
+
+// Function หน้าตั้งค่าระบบ ทั่วไป ใบเสร็จขาเข้า และใบเสร็จชำระเงิน
+function SettingSystemPage(): JSX.Element {
   const [activeTab, setActiveTab] = useState<SystemMenuKey>("device");
   const [currentDateTime, setCurrentDateTime] = useState("");
   const [loading, setLoading] = useState(true);
@@ -111,22 +119,22 @@ function SettingSystemPage() {
   function renderContent() {
     switch (activeTab) {
       case "device":
-        return <SystemDeviceConfigContent />;
+        return <GeneralTab />;
 
       case "entry_bill":
-        return <SystemEntryBillContent />;
+        return <EntryBillTab />;
 
       case "paid_bill":
-        return <SystemPaidBillContent />;
+        return <PaidBillTab />;
 
       default:
-        return <SystemDeviceConfigContent />;
+        return <GeneralTab />;
     }
   }
 
   if (loading) {
     return (
-      <Preload
+      <LoadingScreen
         open
         progress={progress}
         message="กำลังโหลดข้อมูล..."
@@ -160,7 +168,7 @@ function SettingSystemPage() {
           </p>
         </div>
 
-        <SystemMenuTabs activeTab={activeTab} onChange={setActiveTab} />
+        <SystemTabs activeTab={activeTab} onChange={setActiveTab} />
 
         <div className="mt-8 min-w-0 max-w-full">{renderContent()}</div>
       </div>

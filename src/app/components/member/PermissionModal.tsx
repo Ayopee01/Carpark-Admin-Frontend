@@ -1,33 +1,21 @@
 "use client";
-
-import type { ReactNode } from "react";
+// Import Library
+import type { JSX } from "react";
 import { LuX } from "react-icons/lu";
+// Import Types
+import type { PermissionModalProps } from "@/src/app/type/ui/member";
 
-export type PermissionItem = {
-    key: string;
-    label: string;
-    icon: ReactNode;
-};
-
-type Props = {
-    open: boolean;
-    permissions: PermissionItem[];
-    selectedPermissions: string[];
-    submitting: boolean;
-    onClose: () => void;
-    onToggle: (key: string) => void;
-    onSubmit: () => void;
-};
-
+// Function dialog เลือก permission ของสมาชิก แสดงเฉพาะที่ผู้ใช้ปัจจุบันให้ได้
 function PermissionModal({
     open,
     permissions,
     selectedPermissions,
+    isGrantable = () => true,
     submitting,
     onClose,
     onToggle,
     onSubmit,
-}: Props) {
+}: PermissionModalProps): JSX.Element | null {
     if (!open) return null;
 
     return (
@@ -51,25 +39,33 @@ function PermissionModal({
 
                 <div className="px-5 py-6 sm:px-8 sm:py-7">
                     <div className="space-y-5">
-                        {permissions.map((permission) => (
+                        {permissions.map((permission) => {
+                            const grantable = isGrantable(permission.key);
+
+                            return (
                             <label
                                 key={permission.key}
-                                className="flex cursor-pointer items-center justify-between"
+                                title={grantable ? undefined : "บัญชีของคุณไม่มีสิทธิ์นี้ จึงให้ผู้อื่นไม่ได้"}
+                                className={`flex items-center justify-between ${grantable ? "cursor-pointer" : "cursor-not-allowed opacity-60"}`}
                             >
                                 <span className="flex items-center gap-4 text-[14px] text-[#111827]">
                                     <span className="text-[18px]">{permission.icon}</span>
                                     {permission.label}
+                                    {grantable ? null : (
+                                        <span className="text-[11px] text-[#9CA3AF]">(คุณไม่มีสิทธิ์นี้)</span>
+                                    )}
                                 </span>
 
                                 <input
                                     type="checkbox"
                                     checked={selectedPermissions.includes(permission.key)}
                                     onChange={() => onToggle(permission.key)}
-                                    disabled={submitting}
+                                    disabled={submitting || !grantable}
                                     className="h-4 w-4 accent-[#061D36] disabled:cursor-not-allowed disabled:opacity-60"
                                 />
                             </label>
-                        ))}
+                            );
+                        })}
                     </div>
 
                     <div className="mt-9 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end sm:gap-4">
@@ -97,4 +93,4 @@ function PermissionModal({
     );
 }
 
-export default PermissionModal;
+export { PermissionModal };

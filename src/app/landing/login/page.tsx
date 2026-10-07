@@ -1,11 +1,36 @@
 "use client";
-
-import { useEffect, useState } from "react";
+// Import Library
+import { useEffect, useState, type JSX } from "react";
 import { useRouter } from "next/navigation";
 import { FiArrowRight, FiAtSign, FiEye, FiEyeOff, FiLock } from "react-icons/fi";
-import type { LoginResponse } from "@/src/app/type/auth/Login"
+// Import Api
+import { login } from "@/src/app/lib/api/auth";
+// Import Auth
+import { SESSION_END_MESSAGES, hasSession, isRemembered, startSession } from "@/src/app/lib/auth/session";
+// Import Types
+import type { SessionEndReason } from "@/src/app/type/ui/login";
+// Import Shared
+import { ApiError } from "@/src/app/lib/shared/http";
 
-function LoginPage() {
+/* -------------------------------------- Config -------------------------------------- */
+
+// Config หน้าที่ไปหลัง login เมื่อไม่มี redirect
+const DEFAULT_AFTER_LOGIN = "/landing/dashboard";
+
+/* -------------------------------------- Helpers -------------------------------------- */
+
+// Function ใช้ redirect เฉพาะ path ภายใน /landing (กัน open redirect)
+function getSafeRedirect(value: string | null): string {
+    if (!value || !value.startsWith("/landing/") || value.startsWith("/landing/login")) {
+        return DEFAULT_AFTER_LOGIN;
+    }
+    return value;
+}
+
+/* -------------------------------------- Component -------------------------------------- */
+
+// Function หน้าเข้าสู่ระบบ
+function LoginPage(): JSX.Element {
     const router = useRouter();
     const [username, setUsername] = useState("");
     const [password, setPassword] = useState("");
@@ -13,13 +38,29 @@ function LoginPage() {
     const [rememberMe, setRememberMe] = useState(false);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState("");
+    // เหตุผลที่ session ก่อนจบ (จาก ?reason=) แสดงเหนือฟอร์ม
+    const [notice, setNotice] = useState("");
+    const [redirectTo, setRedirectTo] = useState(DEFAULT_AFTER_LOGIN);
+    // วินาทีที่เหลือก่อน login ได้อีกหลัง TOO_MANY_LOGIN_ATTEMPTS
+    const [cooldown, setCooldown] = useState(0);
 
     useEffect(() => {
-        const token = localStorage.getItem("token");
-        const remembered = localStorage.getItem("rememberMe");
+        if (cooldown <= 0) return;
+        const timer = window.setTimeout(() => setCooldown((value) => value - 1), 1000);
+        return () => window.clearTimeout(timer);
+    }, [cooldown]);
 
-        if (token && remembered === "true") {
-            router.replace("/landing/dashboard");
+    useEffect(() => {
+        // ใช้ window.location แทน useSearchParams ไม่ต้องมี Suspense
+        const params = new URLSearchParams(window.location.search);
+        const reason = params.get("reason") as SessionEndReason | null;
+        const message = reason ? SESSION_END_MESSAGES[reason] : "";
+        setNotice(message ?? "");
+        setRedirectTo(getSafeRedirect(params.get("redirect")));
+
+        // มี redirect = หน้าหลังบ้านไม่พบ session ให้อยู่หน้านี้
+        if (!reason && !params.has("redirect") && hasSession() && isRemembered()) {
+            router.replace(DEFAULT_AFTER_LOGIN);
         }
     }, [router]);
 
@@ -29,37 +70,32 @@ function LoginPage() {
         setLoading(true);
 
         try {
-            const res = await fetch("/api/auth/login", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify({
-                    username,
-                    password,
-                }),
-            });
+            const data = await login({ username, password, rememberMe });
 
-            const data = (await res.json().catch(() => null)) as LoginResponse | null;
-
-            if (!res.ok || !data?.token || !data?.refreshToken || !data?.user) {
-                setError("ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง");
+            if (!data?.user) {
+                setError("ระบบตอบกลับข้อมูลไม่ครบ กรุณาลองใหม่อีกครั้ง");
                 return;
             }
 
-            localStorage.setItem("token", data.token);
-            localStorage.setItem("refreshToken", data.refreshToken);
-            localStorage.setItem("user", JSON.stringify(data.user));
+            // บันทึกเวลาหมดอายุ ตั้งเวลา refresh และแจ้งแท็บอื่น
+            startSession(data, rememberMe);
+            setNotice("");
 
-            if (rememberMe) {
-                localStorage.setItem("rememberMe", "true");
+            router.push(redirectTo);
+        } catch (err) {
+            if (err instanceof ApiError && (err.status === 429 || err.code === "TOO_MANY_LOGIN_ATTEMPTS")) {
+                setCooldown(err.retryAfterSeconds ? Math.ceil(err.retryAfterSeconds) : 60);
+                setError("พยายามเข้าสู่ระบบหลายครั้งเกินไป กรุณารอสักครู่แล้วลองใหม่");
+            } else if (err instanceof ApiError && err.code === "VALIDATION_ERROR") {
+                setError("กรุณากรอกชื่อผู้ใช้และรหัสผ่าน");
+            } else if (err instanceof ApiError && err.status >= 500) {
+                setError(err.message || "ระบบขัดข้อง กรุณาลองใหม่อีกครั้ง");
+            } else if (err instanceof ApiError) {
+                // 401 INVALID_CREDENTIALS และ error อื่นจาก backend
+                setError("ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง");
             } else {
-                localStorage.removeItem("rememberMe");
+                setError("ไม่สามารถเชื่อมต่อระบบได้");
             }
-
-            router.push("/landing/dashboard");
-        } catch {
-            setError("ไม่สามารถเชื่อมต่อระบบได้");
         } finally {
             setLoading(false);
         }
@@ -156,16 +192,28 @@ function LoginPage() {
                             </button>
                         </div>
 
+                        {notice && !error ? (
+                            <p className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">
+                                {notice}
+                            </p>
+                        ) : null}
+
                         {error ? (
                             <p className="text-sm font-medium text-red-600">{error}</p>
                         ) : null}
 
                         <button
                             type="submit"
-                            disabled={loading}
+                            disabled={loading || cooldown > 0}
                             className="inline-flex min-h-14 w-full items-center justify-center gap-2.5 rounded-[10px] bg-[#071a2f] text-[21px] font-bold text-white shadow-[0_8px_20px_rgba(7,26,47,0.18)] transition hover:opacity-95 active:translate-y-[1px] disabled:cursor-not-allowed disabled:opacity-60"
                         >
-                            <span>{loading ? "กำลังเข้าสู่ระบบ..." : "เข้าสู่ระบบ"}</span>
+                            <span>
+                                {loading
+                                    ? "กำลังเข้าสู่ระบบ..."
+                                    : cooldown > 0
+                                        ? `ลองใหม่ได้ใน ${cooldown} วินาที`
+                                        : "เข้าสู่ระบบ"}
+                            </span>
                             <FiArrowRight className="h-[22px] w-[22px]" />
                         </button>
                     </form>

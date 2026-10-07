@@ -1,16 +1,20 @@
 "use client";
+// Import Library
+import { useEffect, useMemo, useState, type JSX } from "react";
+// Import Components
+import { LoadingScreen } from "@/src/app/components/shared/LoadingScreen";
+import { DeviceTabs } from "@/src/app/components/device/DeviceTabs";
+import { DevicesTab } from "@/src/app/components/device/devices/DevicesTab";
+import { PricingTab } from "@/src/app/components/device/pricing/PricingTab";
+import { ChannelsTab } from "@/src/app/components/device/channels/ChannelsTab";
+import { ThemeTab } from "@/src/app/components/device/ThemeTab";
+// Import Types
+import type { SettingMenuKey } from "@/src/app/type/ui/navigation";
 
-import { useEffect, useMemo, useState } from "react";
-import Preload from "@/src/app/components/Preload";
-import SettingMenuTabs, {
-  type SettingMenuKey,
-} from "@/src/app/components/device/DeviceMenuTabs";
-import DeviceSettingContent from "@/src/app/components/device/device/DeviceSettingContent";
-import PricingSettingContent from "@/src/app/components/device/pricing/PricingSettingContent";
-import ChannelSettingContent from "@/src/app/components/device/payment/ChannelSettingContent";
-import ThemeSettingContent from "@/src/app/components/device/theme/ThemeSettingContent";
+/* -------------------------------------- Helpers -------------------------------------- */
 
-function formatThaiDateTime(date: Date) {
+// Function แปลงวันเวลาเป็นข้อความไทย
+function formatThaiDateTime(date: Date): string {
   return new Intl.DateTimeFormat("th-TH-u-ca-buddhist", {
     day: "2-digit",
     month: "short",
@@ -25,7 +29,8 @@ function formatThaiDateTime(date: Date) {
     .replace(",", "");
 }
 
-function getLoadingDetail(activeTab: SettingMenuKey) {
+// Function ข้อความระหว่างโหลดของแต่ละแท็บ
+function getLoadingDetail(activeTab: SettingMenuKey): string {
   switch (activeTab) {
     case "device":
       return "กำลังโหลดการตั้งค่าอุปกรณ์";
@@ -40,7 +45,10 @@ function getLoadingDetail(activeTab: SettingMenuKey) {
   }
 }
 
-function DevicePage() {
+/* -------------------------------------- Component -------------------------------------- */
+
+// Function หน้าตั้งค่าอุปกรณ์ แสดงแท็บตาม permission
+function DevicePage(): JSX.Element {
   const [activeTab, setActiveTab] = useState<SettingMenuKey>("device");
   const [currentDateTime, setCurrentDateTime] = useState("");
   const [loading, setLoading] = useState(true);
@@ -118,25 +126,25 @@ function DevicePage() {
   function renderContent() {
     switch (activeTab) {
       case "device":
-        return <DeviceSettingContent />;
+        return <DevicesTab />;
 
       case "pricing":
-        return <PricingSettingContent />;
+        return <PricingTab />;
 
       case "channels":
-        return <ChannelSettingContent />;
+        return <ChannelsTab />;
 
       case "theme":
-        return <ThemeSettingContent />;
+        return <ThemeTab />;
 
       default:
-        return <DeviceSettingContent />;
+        return <DevicesTab />;
     }
   }
 
   if (loading) {
     return (
-      <Preload
+      <LoadingScreen
         open
         progress={progress}
         message="กำลังโหลดข้อมูล..."
@@ -170,7 +178,7 @@ function DevicePage() {
           </p>
         </div>
 
-        <SettingMenuTabs activeTab={activeTab} onChange={setActiveTab} />
+        <DeviceTabs activeTab={activeTab} onChange={setActiveTab} />
 
         <div className="mt-8 min-w-0 max-w-full">{renderContent()}</div>
       </div>

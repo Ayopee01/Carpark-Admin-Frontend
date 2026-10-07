@@ -1,30 +1,32 @@
 "use client";
-
+// Import Library
+import type { JSX } from "react";
 import { LuX } from "react-icons/lu";
-import type { CreateMemberPayload } from "@/src/app/type/member/member";
+// Import Types
+import type { AddMemberModalProps } from "@/src/app/type/ui/member";
 
-type Props = {
-    open: boolean;
-    form: CreateMemberPayload;
-    submitting: boolean;
-    onClose: () => void;
-    onChange: React.Dispatch<React.SetStateAction<CreateMemberPayload>>;
-    onSubmit: () => void;
-};
+// Function แสดงข้อความ error ใต้ช่องกรอก
+function FieldError({ message, className = "" }: { message?: string; className?: string }): JSX.Element | null {
+    return message ? <p className={`-mt-2 text-[12px] text-red-600 ${className}`}>{message}</p> : null;
+}
 
+// Config ตัวเลือก role
 const ROLE_OPTIONS = [
     { value: "super_admin", label: "ผู้ดูแลระบบ" },
     { value: "staff", label: "แคชเชียร์" },
 ];
 
+// Function dialog เพิ่มสมาชิกใหม่
 function AddMemberModal({
     open,
     form,
+    error = "",
+    fieldErrors = {},
     submitting,
     onClose,
     onChange,
     onSubmit,
-}: Props) {
+}: AddMemberModalProps): JSX.Element | null {
     if (!open) return null;
 
     return (
@@ -38,19 +40,25 @@ function AddMemberModal({
                 <p className="mt-1 text-[14px] text-[#6B7280]">กรอกข้อมูลสมาชิกใหม่</p>
 
                 <div className="mt-7 grid grid-cols-1 gap-4 sm:grid-cols-2">
-                    <input
-                        value={form.firstName}
-                        onChange={(e) => onChange((p) => ({ ...p, firstName: e.target.value }))}
-                        placeholder="ระบุชื่อ"
-                        className="h-11 rounded-md border border-[#E5E7EB] px-4 outline-none"
-                    />
+                    <div className="flex flex-col gap-3">
+                        <input
+                            value={form.firstName}
+                            onChange={(e) => onChange((p) => ({ ...p, firstName: e.target.value }))}
+                            placeholder="ระบุชื่อ"
+                            className="h-11 rounded-md border border-[#E5E7EB] px-4 outline-none"
+                        />
+                        <FieldError message={fieldErrors.firstName ?? fieldErrors.name} />
+                    </div>
 
-                    <input
-                        value={form.lastName}
-                        onChange={(e) => onChange((p) => ({ ...p, lastName: e.target.value }))}
-                        placeholder="ระบุนามสกุล"
-                        className="h-11 rounded-md border border-[#E5E7EB] px-4 outline-none"
-                    />
+                    <div className="flex flex-col gap-3">
+                        <input
+                            value={form.lastName}
+                            onChange={(e) => onChange((p) => ({ ...p, lastName: e.target.value }))}
+                            placeholder="ระบุนามสกุล"
+                            className="h-11 rounded-md border border-[#E5E7EB] px-4 outline-none"
+                        />
+                        <FieldError message={fieldErrors.lastName} />
+                    </div>
 
                     <input
                         value={form.email}
@@ -58,6 +66,7 @@ function AddMemberModal({
                         placeholder="example@gridlock.com"
                         className="h-11 rounded-md border border-[#E5E7EB] px-4 outline-none sm:col-span-2"
                     />
+                    <FieldError message={fieldErrors.email} className="sm:col-span-2" />
 
                     <input
                         type="password"
@@ -66,6 +75,7 @@ function AddMemberModal({
                         placeholder="example1234567890"
                         className="h-11 rounded-md border border-[#E5E7EB] px-4 outline-none sm:col-span-2"
                     />
+                    <FieldError message={fieldErrors.password} className="sm:col-span-2" />
 
                     <input
                         value={form.phone}
@@ -73,6 +83,7 @@ function AddMemberModal({
                         placeholder="08X-XXX-XXXX"
                         className="h-11 rounded-md border border-[#E5E7EB] px-4 outline-none sm:col-span-2"
                     />
+                    <FieldError message={fieldErrors.phone} className="sm:col-span-2" />
 
                     <select
                         value={form.role}
@@ -86,7 +97,14 @@ function AddMemberModal({
                             </option>
                         ))}
                     </select>
+                    <FieldError message={fieldErrors.role} className="sm:col-span-2" />
                 </div>
+
+                {error ? (
+                    <div className="mt-6 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-[13px] text-red-600">
+                        {error}
+                    </div>
+                ) : null}
 
                 <div className="mt-9 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end sm:gap-4">
                     <button type="button" onClick={onClose} className="h-11 min-w-[110px] rounded-full bg-[#9CA3AF] px-6 text-[14px] font-bold text-white">
@@ -102,4 +120,4 @@ function AddMemberModal({
     );
 }
 
-export default AddMemberModal;
+export { AddMemberModal };
