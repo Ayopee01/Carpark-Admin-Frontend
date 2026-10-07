@@ -17,22 +17,25 @@ npm run dev                  # http://localhost:3000 (ต้องอยู่�
 
 | Workflow | เมื่อไหร่ | ทำอะไร |
 | --- | --- | --- |
-| `.github/workflows/ci.yml` | ทุก pull request และ push ที่ไม่ใช่ `main` | lint, typecheck, build |
-| `.github/workflows/deploy.yml` | push เข้า `main` หรือกดรันเอง | ตรวจแบบเดียวกัน → build Docker image → push ไป GHCR → SSH เข้า server แล้ว `docker compose up` |
+| `.github/workflows/ci.yml` job `check` | pull request และ push เข้า `main` | lint, typecheck, build |
+| `.github/workflows/ci.yml` job `deploy` | push เข้า `main` หลัง `check` ผ่าน | build Docker image → push ไป GHCR → SSH เข้า server แล้ว `docker compose up` |
+| `.github/dependabot.yml` | ทุกสัปดาห์ | เปิด PR อัปเดต npm, GitHub Actions และ Docker image (minor/patch รวม PR เดียว, major แยก PR) |
+
+ยังไม่มี server: ไม่ต้องตั้งอะไร ถ้าไม่มี secret `DEPLOY_HOST` job `deploy` จะข้ามทุกขั้นตอนโดยไม่ fail ตั้ง secret ครบเมื่อไรจะ deploy เองโดยไม่ต้องแก้ workflow
 
 image: `ghcr.io/<owner>/carpark-admin-frontend:<commit sha>` (และ `:latest`)
 `NEXT_PUBLIC_API_BASE_URL` ถูกฝังตอน build image ถ้าเปลี่ยนค่าต้อง deploy ใหม่
 
 ### ตั้งค่าครั้งแรก
 
-**GitHub** (Settings → Environments → สร้าง `production`)
+**GitHub** (Settings → Environments → `production`)
 
 | ชนิด | ชื่อ | ค่า |
 | --- | --- | --- |
 | Variable | `NEXT_PUBLIC_API_BASE_URL` | origin ของ API เช่น `https://api.<domain>` |
 | Variable | `DEPLOY_PATH` | โฟลเดอร์บน server เช่น `/srv/smart-carpark/admin` |
 | Secret | `DEPLOY_HOST` | IP หรือ hostname ของ server |
-| Secret | `DEPLOY_PORT` | port ของ SSH (ปกติ `22`) |
+| Secret | `DEPLOY_PORT` | port ของ SSH (ไม่ตั้ง = `22`) |
 | Secret | `DEPLOY_USER` | user ที่ใช้ docker ได้ |
 | Secret | `DEPLOY_SSH_KEY` | private key ของ user นั้น |
 
@@ -57,4 +60,4 @@ cat .deployed-image                       # image ที่ deploy ล่าส�
 ADMIN_IMAGE=ghcr.io/<owner>/carpark-admin-frontend:<sha เดิม> docker compose up -d --wait
 ```
 
-ถ้า package บน GHCR เป็น private ต้อง `docker login ghcr.io` ด้วย token ที่มีสิทธิ์ `read:packages` ก่อน หรือเปิด run ของ Deploy ครั้งก่อนในแท็บ Actions แล้วกด Re-run all jobs (จะ deploy commit เดิม)
+ถ้า package บน GHCR เป็น private ต้อง `docker login ghcr.io` ด้วย token ที่มีสิทธิ์ `read:packages` ก่อน หรือเปิด run ของ CI ครั้งก่อนในแท็บ Actions แล้วกด Re-run all jobs (จะ deploy commit เดิม)
