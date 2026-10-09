@@ -1,0 +1,14 @@
+# Admin Frontend บน server (อยู่หลัง Nginx Proxy Manager ผ่าน npm-network)
+# ADMIN_IMAGE มาจาก GitHub Actions เช่น ghcr.io/ayopee01/carpark-admin-frontend:<commit sha>
+# rollback: ADMIN_IMAGE=ghcr.io/ayopee01/carpark-admin-frontend:<sha เดิม> docker compose up -d
+services:
+  admin-frontend:
+    image: ${ADMIN_IMAGE:?ADMIN_IMAGE is required}
+    container_name: smart-carpark-admin
+    restart: unless-stopped
+    networks:
+      - npm-network
+
+networks:
+  npm-network:
+    external: true
