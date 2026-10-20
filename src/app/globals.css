@@ -1,0 +1,25 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* -------------------- Variants -------------------- */
+
+/* data-open / data-closed ของ component shadcn ให้ใช้กับ data-state ของ Radix ได้ด้วย */
+@custom-variant data-open (&:where([data-state="open"], [data-open]:not([data-open="false"])));
+@custom-variant data-closed (&:where([data-state="closed"], [data-closed]:not([data-closed="false"])));
+
+/* ผู้ใช้ที่ปิด animation ในเครื่อง: sheet/dialog/select เปิด/ปิดทันที (ยังต้องมี animation สั้น ๆ ให้ Radix รู้ว่าเล่นจบ) */
+@media (prefers-reduced-motion: reduce) {
+  [data-slot="sheet-content"],
+  [data-slot="sheet-overlay"],
+  [data-slot="dialog-content"],
+  [data-slot="dialog-overlay"],
+  [data-slot="select-content"] {
+    animation-duration: 1ms !important;
+  }
+}
+
+/* -------------------- Global Styles -------------------- */
+
+body {
+  font-family: var(--font-inter), var(--font-thai), system-ui, sans-serif;
+}

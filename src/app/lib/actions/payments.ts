@@ -1,0 +1,25 @@
+"use server";
+// Import Data
+import * as paymentsData from "@/src/app/lib/data/payments";
+// Import Server
+import { runAction } from "@/src/app/lib/server/action";
+// Import Types
+import type { ActionResult } from "@/src/app/type/api/common";
+import type { CreateChargeRequest, CreateChargeResponse, ResolveRefundRequest, ResolveRefundResponse, VerifyChargeResponse } from "@/src/app/type/api/payments";
+
+// Server Action สร้าง QR PromptPay
+async function createCharge(body: CreateChargeRequest): Promise<ActionResult<CreateChargeResponse>> {
+  return runAction(() => paymentsData.createCharge(body));
+}
+
+// Server Action ขอให้ backend ตรวจสถานะ charge กับ Omise อีกครั้ง
+async function verifyCharge(chargeId: string): Promise<ActionResult<VerifyChargeResponse>> {
+  return runAction(() => paymentsData.verifyCharge(chargeId));
+}
+
+// Server Action บันทึกว่าคืนเงินให้ลูกค้าแล้ว
+async function resolveRefund(chargeId: string, body: ResolveRefundRequest = {}): Promise<ActionResult<ResolveRefundResponse>> {
+  return runAction(() => paymentsData.resolveRefund(chargeId, body));
+}
+
+export { createCharge, verifyCharge, resolveRefund };
